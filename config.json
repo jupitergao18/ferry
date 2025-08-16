@@ -1,0 +1,22 @@
+{
+	"server" : {
+		"bind_address" : "0.0.0.0:17000",
+		"psk" : "1234qwerA",
+		"service" : {
+			"service1" : {
+			}
+		}
+	},
+	"clients" : [
+		{
+			"server_address" : "127.0.0.1:17000",
+			"psk" : "1234qwerA",
+			"service" : {
+				"service1" : {
+					"bind_address" : "127.0.0.1:12001",
+					"address" : "apicenter.com.cn:16001"
+				}
+			}
+		}
+	]
+}
