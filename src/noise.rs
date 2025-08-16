@@ -1,4 +1,4 @@
-use crate::{hash, set_tcp_opt};
+use crate::hash;
 use anyhow::Result;
 use futures_util::ready;
 use pin_project::pin_project;
@@ -10,7 +10,6 @@ use std::{
     task::{Context, Poll, Waker},
 };
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
-use tokio::net::TcpStream;
 
 const TAG_LEN: usize = 16;
 const MAX_MESSAGE_LEN: usize = u16::MAX as usize;
@@ -344,13 +343,4 @@ where
     T: AsyncRead + AsyncWrite + Unpin,
 {
     NoiseStream::handshake(stream, build_initiator(psk)?).await
-}
-
-pub fn set_noise_opt(
-    stream: &NoiseStream<TcpStream>,
-    nodelay: bool,
-    keepalive_secs: u64,
-    keepalive_interval: u64,
-) -> Result<()> {
-    set_tcp_opt(&stream.inner, nodelay, keepalive_secs, keepalive_interval)
 }

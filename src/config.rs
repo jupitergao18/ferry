@@ -16,7 +16,12 @@ const DEFAULT_KEEPALIVE_INTERVAL: u64 = 8;
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Config {
     pub server: Option<ServerConfig>,
+    #[serde(default = "default_clients")]
     pub clients: Vec<ClientConfig>,
+}
+
+fn default_clients() -> Vec<ClientConfig> {
+    Vec::new()
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -55,7 +60,6 @@ pub struct ClientConfig {
 pub struct ServiceConfig {
     pub bind_address: Option<String>, // consumer
     pub address: Option<String>,      // provider
-    pub psk: Option<String>,          // provider and consumer
     pub nodelay: Option<bool>,        // provider and consumer
     pub retry_interval: Option<u64>,  // provider
 }

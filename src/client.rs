@@ -190,7 +190,7 @@ async fn handle_server_request(
     loop {
         match read_server_request(&mut stream).await? {
             ServerRequest::ConsumeService(nonce) => {
-                debug!("Provider: Receive server consume Service");
+                debug!("Provider: Receive server consume Service: {}", hex::encode(nonce));
                 debug!("Provider: Connecting upstream");
                 let up_stream = match up_socket_addr {
                     Some(s) => TcpStream::connect(s).await,

@@ -1,5 +1,5 @@
-use crate::hash;
-use crate::noise::{NoiseStream, initiator_handshake, responder_handshake, set_noise_opt};
+use crate::{hash, set_tcp_opt};
+use crate::noise::{NoiseStream, initiator_handshake, responder_handshake};
 use anyhow::{Result, bail};
 use bincode::enc::write::SizeWriter;
 use bincode::{Decode, Encode};
@@ -118,7 +118,7 @@ pub async fn server_handshake(
     {
         Ok(stream) => match stream {
             Ok(mut stream) => {
-                if let Err(e) = set_noise_opt(&stream, nodelay, keepalive_secs, keepalive_interval)
+                if let Err(e) = set_tcp_opt(stream.get_inner(), nodelay, keepalive_secs, keepalive_interval)
                 {
                     bail!("set noise option error: {e}")
                 }
@@ -145,7 +145,7 @@ pub async fn client_handshake(
         None => TcpStream::connect(server_address).await?,
     };
     let mut stream = initiator_handshake(stream, psk).await?;
-    if let Err(e) = set_noise_opt(&stream, nodelay, keepalive_secs, keepalive_interval) {
+    if let Err(e) = set_tcp_opt(stream.get_inner(), nodelay, keepalive_secs, keepalive_interval) {
         bail!("set tcp option error: {e:?}");
     }
     write_and_flush(&mut stream, ClientVersion::version()).await?;
