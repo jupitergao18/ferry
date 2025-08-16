@@ -47,10 +47,10 @@ pub async fn run(config_path: PathBuf, ctrlc_tx: broadcast::Sender<bool>) -> Res
         }
     }
 
-    if let Some(stop_tx) = &instance_stop_tx {
-        if let Err(e) = stop_tx.send(()) {
-            error!("Stop instance error: {e:?}");
-        }
+    if let Some(stop_tx) = &instance_stop_tx
+        && let Err(e) = stop_tx.send(())
+    {
+        error!("Stop instance error: {e:?}");
     }
 
     Ok(())

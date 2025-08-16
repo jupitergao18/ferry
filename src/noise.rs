@@ -120,10 +120,10 @@ where
                 let len = inner.read_u16_le().await? as usize;
                 inner.read_exact(&mut message[..len]).await?;
                 state.read_message(&message[..len], &mut payload)?;
-                if let Some(pubkey) = state.get_remote_static() {
-                    if let Some(verifier) = f.take() {
-                        verifier(pubkey)?;
-                    }
+                if let Some(pubkey) = state.get_remote_static()
+                    && let Some(verifier) = f.take()
+                {
+                    verifier(pubkey)?;
                 }
             }
         }

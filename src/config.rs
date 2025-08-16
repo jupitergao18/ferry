@@ -119,10 +119,9 @@ pub async fn watch(
                         .iter()
                         .map(|x| x.file_name())
                         .any(|x| x == config_path_clone.file_name())
+                    && let Err(e) = notify_tx.send(true)
                 {
-                    if let Err(e) = notify_tx.send(true) {
-                        warn!("config change event send error: {e:?}");
-                    }
+                    warn!("config change event send error: {e:?}");
                 }
             }
             Err(e) => error!("watch error: {:#}", e),

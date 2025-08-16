@@ -1,8 +1,8 @@
 use crate::config::ServerConfig;
 use crate::hash;
 use crate::protocol::{
-    ClientRequest, ClientResponse, NonceDigest, SecureStream, ServerRequest, ServerResponse,
-    ServiceDigest, read_client_request, read_client_response, server_handshake, write_and_flush,
+    read_client_request, read_client_response, server_handshake, write_and_flush, ClientRequest, ClientResponse,
+    NonceDigest, SecureStream, ServerRequest, ServerResponse, ServiceDigest,
 };
 use anyhow::Result;
 use std::collections::HashMap;
@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::copy_bidirectional;
 use tokio::net::TcpListener;
-use tokio::sync::{RwLock, broadcast};
+use tokio::sync::{broadcast, RwLock};
 use tokio::time;
 use tracing::{debug, error, info, warn};
 
@@ -148,12 +148,10 @@ async fn handle_connection(mut stream: SecureStream, server_state: ServerState) 
                 ) {
                     debug!("Server: Provider service unavailable, response to Consumer");
                     if let Some(mut stream) = server_state.wait_stream.write().await.remove(&nonce)
-                    {
-                        if let Err(e) =
+                        && let Err(e) =
                             write_and_flush(&mut stream, ServerResponse::NoProvider).await
-                        {
-                            error!("response to client error: {e:?}");
-                        }
+                    {
+                        error!("response to client error: {e:?}");
                     }
                 };
             } else if let Err(e) = write_and_flush(&mut stream, ServerResponse::NoProvider).await {
