@@ -1,16 +1,20 @@
 use std::path::PathBuf;
 
 use anyhow::Result;
-use clap::Parser;
 use tokio::signal;
 use tokio::sync::broadcast;
 use tracing::{error, info};
-use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt::time::ChronoLocal;
+use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let args = Args::parse();
+    let args = std::env::args().collect::<Vec<String>>();
+    let config_path = PathBuf::from(if args.len() < 2 {
+        "./config.json".to_string()
+    } else {
+        args[1].clone()
+    });
 
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or(EnvFilter::from("debug")))
@@ -31,18 +35,10 @@ async fn main() -> Result<()> {
         }
     });
 
-    if let Err(e) = ferry::run(args.config_path, ctrlc_tx_for_subscribe).await {
+    if let Err(e) = ferry::run(config_path, ctrlc_tx_for_subscribe).await {
         error!("{e:?}");
     }
 
     info!("Shutdown");
     Ok(())
-}
-
-#[derive(Parser, Debug, Default, Clone)]
-#[command(version, about, long_about = None)]
-pub struct Args {
-    /// Configuration file
-    #[arg(short, long, default_value = "./config.json")]
-    pub config_path: PathBuf,
 }

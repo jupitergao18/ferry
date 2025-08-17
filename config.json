@@ -9,7 +9,7 @@
 	},
 	"clients" : [
 		{
-			"server_address" : "127.0.0.1:17000",
+			"server_address" : "127.0.0.1:37000",
 			"psk" : "1234qwerA",
 			"service" : {
 				"service1" : {

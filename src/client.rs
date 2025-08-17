@@ -1,23 +1,24 @@
 use crate::config::{ClientConfig, ServiceConfig};
 use crate::protocol::{
-    ClientRequest, ClientResponse, SecureStream, ServerRequest, ServerResponse, client_handshake,
-    read_server_request, read_server_response, write_and_flush,
+    client_handshake, read_server_request, read_server_response, write_and_flush, ClientRequest, ClientResponse,
+    SecureStream, ServerRequest, ServerResponse,
 };
 use crate::set_tcp_opt;
-use anyhow::{Result, bail};
+use anyhow::{bail, Result};
+use backon::{BackoffBuilder, ExponentialBuilder};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::copy_bidirectional;
-use tokio::net::{TcpListener, TcpStream, lookup_host};
-use tokio::sync::{RwLock, broadcast, mpsc};
+use tokio::net::{lookup_host, TcpListener, TcpStream};
+use tokio::sync::{broadcast, oneshot, RwLock};
 use tokio::time;
 use tracing::{debug, error, info, warn};
 
 type ClientState = Arc<InnerClientState>;
 struct InnerClientState {
-    service_stop_tx: RwLock<HashMap<String, mpsc::UnboundedSender<()>>>,
+    service_stop_tx: RwLock<HashMap<String, oneshot::Sender<()>>>,
 }
 
 pub struct Client {
@@ -42,14 +43,47 @@ impl Client {
     pub async fn run(&mut self, mut stop_rx: broadcast::Receiver<()>) -> Result<()> {
         for (service_name, service_config) in &self.config.service {
             if service_config.address.is_some() || service_config.bind_address.is_some() {
-                let (service_stop_tx, service_stop_rx) = mpsc::unbounded_channel::<()>();
+                let (service_stop_tx, service_stop_rx) = oneshot::channel::<()>();
                 let mut service = Service::from_config(
                     service_name.clone(),
                     service_config.clone(),
                     self.config.clone(),
                     self.server_socket_addr,
+                    service_stop_rx,
                 )?;
-                tokio::spawn(async move { service.run(service_stop_rx).await });
+
+                let retry_backoff_builder = ExponentialBuilder::new()
+                    .with_jitter()
+                    .with_max_delay(Duration::from_secs(
+                        service_config
+                            .retry_interval
+                            .unwrap_or(self.config.retry_interval),
+                    ))
+                    .without_max_times();
+
+                tokio::spawn(async move {
+                    let mut start = time::Instant::now();
+                    let mut retry_backoff = retry_backoff_builder.build();
+                    while let Err(e) = service.run().await {
+                        if service.stop_rx.try_recv() != Err(oneshot::error::TryRecvError::Empty) {
+                            break;
+                        }
+
+                        if start.elapsed() > Duration::from_secs(3) {
+                            retry_backoff = retry_backoff_builder.build();
+                        }
+
+                        if let Some(duration) = retry_backoff.next() {
+                            error!("Service error {e}. Retry in {duration:?}...");
+                            time::sleep(duration).await;
+                        } else {
+                            // Should never reach
+                            panic!("Retry Break, error: {:?}", e);
+                        }
+
+                        start = time::Instant::now();
+                    }
+                });
                 self.state
                     .service_stop_tx
                     .write()
@@ -71,6 +105,7 @@ pub struct Service {
     service_config: ServiceConfig,
     client_config: ClientConfig,
     server_socket_addr: Option<SocketAddr>,
+    stop_rx: oneshot::Receiver<()>,
 }
 
 impl Service {
@@ -79,16 +114,18 @@ impl Service {
         service_config: ServiceConfig,
         client_config: ClientConfig,
         server_socket_addr: Option<SocketAddr>,
+        stop_rx: oneshot::Receiver<()>,
     ) -> Result<Self> {
         Ok(Self {
             service_name,
             service_config,
             client_config,
             server_socket_addr,
+            stop_rx,
         })
     }
 
-    pub async fn run(&mut self, mut stop_rx: mpsc::UnboundedReceiver<()>) -> Result<()> {
+    pub async fn run(&mut self) -> Result<()> {
         if self.service_config.bind_address.is_none() && self.service_config.address.is_none() {
             bail!("both of bind_address and address unset")
         }
@@ -140,39 +177,34 @@ impl Service {
                 "listening on {bind_address} for service {}",
                 self.service_name
             );
-            let service_config = self.service_config.clone();
-            let client_config = self.client_config.clone();
-            let server_socket_addr = self.server_socket_addr;
-            let service_name = self.service_name.clone();
-            tokio::spawn(async move {
-                loop {
-                    tokio::select! {
-                    accept_result = listener.accept() => {
-                            match accept_result {
-                        Err(e) => {
-                            warn!("accept error: {e}, sleep 100ms");
-                            time::sleep(Duration::from_millis(100)).await;
-                        }
-                        Ok((conn, addr)) => {
-                            info!("Incoming visitor connection from {addr}");
-                            let service_config = service_config.clone();
-                            let client_config = client_config.clone();
-                            let service_name = service_name.clone();
-                            tokio::spawn(async move {
-                                if let Err(err) = handle_visitor_connection(conn,service_name,service_config,client_config,server_socket_addr).await {
-                                    error!("handle visitor connection error: {err:#}");
-                                }
-                            });
-                        }
+            loop {
+                tokio::select! {
+                accept_result = listener.accept() => {
+                        match accept_result {
+                    Err(e) => {
+                        warn!("accept error: {e}, sleep 100ms");
+                        time::sleep(Duration::from_millis(100)).await;
                     }
-                    }
-                    _ = stop_rx.recv() => {
-                        info!("Service {} shutting down...", service_name);
-                        break;
-                    }
+                    Ok((conn, addr)) => {
+                        info!("Incoming visitor connection from {addr}");
+                        let service_config = self.service_config.clone();
+                        let client_config = self.client_config.clone();
+                        let service_name = self.service_name.clone();
+                        let server_socket_addr = self.server_socket_addr;
+                        tokio::spawn(async move {
+                            if let Err(err) = handle_visitor_connection(conn,service_name,service_config,client_config,server_socket_addr).await {
+                                error!("handle visitor connection error: {err:#}");
+                            }
+                        });
                     }
                 }
-            });
+                }
+                _ = &mut self.stop_rx => {
+                    info!("Service {} shutting down...", self.service_name);
+                    break;
+                }
+                }
+            }
         }
 
         Ok(())
@@ -190,7 +222,10 @@ async fn handle_server_request(
     loop {
         match read_server_request(&mut stream).await? {
             ServerRequest::ConsumeService(nonce) => {
-                debug!("Provider: Receive server consume Service: {}", hex::encode(nonce));
+                debug!(
+                    "Provider: Receive server consume Service: {}",
+                    hex::encode(nonce)
+                );
                 debug!("Provider: Connecting upstream");
                 let up_stream = match up_socket_addr {
                     Some(s) => TcpStream::connect(s).await,
