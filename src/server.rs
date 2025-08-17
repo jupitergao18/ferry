@@ -131,12 +131,8 @@ async fn handle_connection(
                 return Ok(());
             }
             let service_name = service_name.unwrap().to_string();
-            if let Some(provider_stream) = server_state
-                .digest_stream
-                .write()
-                .await
-                .get_mut(&service_digest)
-            {
+            let mut digest_stream = server_state.digest_stream.write().await;
+            if let Some(provider_stream) = digest_stream.get_mut(&service_digest) {
                 let consume_service_request = ServerRequest::consume_service();
                 let ServerRequest::ConsumeService(nonce) = consume_service_request;
                 server_state
@@ -151,25 +147,42 @@ async fn handle_connection(
                 if let Err(e) = write_and_flush(provider_stream, consume_service_request).await {
                     error!("send to client error: {e:?}");
                 }
-                if matches!(
-                    read_client_response(provider_stream).await?,
-                    ClientResponse::Unavailable
-                ) {
-                    debug!("Server: Provider service unavailable, response to Consumer");
-                    if let Some((mut stream, _)) =
-                        server_state.wait_stream.write().await.remove(&nonce)
-                        && let Err(e) =
-                            write_and_flush(&mut stream, ServerResponse::NoProvider).await
-                    {
-                        error!("response to client error: {e:?}");
+                match read_client_response(provider_stream).await {
+                    Ok(provider_response) => {
+                        if matches!(provider_response, ClientResponse::Unavailable) {
+                            debug!("Server: Provider service unavailable, response to Consumer");
+                            if let Some((mut stream, _)) =
+                                server_state.wait_stream.write().await.remove(&nonce)
+                                && let Err(e) =
+                                    write_and_flush(&mut stream, ServerResponse::NoProvider).await
+                            {
+                                error!("response to client error: {e:?}");
+                            }
+                        };
                     }
-                };
+                    Err(e) => {
+                        error!(
+                            "Server: Provider stream read error {e}, response to Consumer, remove provider"
+                        );
+                        digest_stream.remove(&service_digest);
+                        if let Some((mut stream, _)) =
+                            server_state.wait_stream.write().await.remove(&nonce)
+                            && let Err(e) =
+                                write_and_flush(&mut stream, ServerResponse::NoProvider).await
+                        {
+                            error!("response to client error: {e:?}");
+                        }
+                    }
+                }
             } else if let Err(e) = write_and_flush(&mut stream, ServerResponse::NoProvider).await {
                 error!("response to client error: {e:?}");
             }
         }
         ClientRequest::ServiceInstance(nonce) => {
-            debug!("Server: Receive new service instance: {}", hex::encode(nonce));
+            debug!(
+                "Server: Receive new service instance: {}",
+                hex::encode(nonce)
+            );
             if let Err(e) = write_and_flush(&mut stream, ServerResponse::Ok).await {
                 error!("response to provider client data stream error: {e:?}");
             }
