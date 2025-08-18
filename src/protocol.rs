@@ -1,5 +1,5 @@
-use crate::{hash, set_tcp_opt};
 use crate::noise::{NoiseStream, initiator_handshake, responder_handshake};
+use crate::{hash, set_tcp_opt};
 use anyhow::{Result, bail};
 use bincode::enc::write::SizeWriter;
 use bincode::{Decode, Encode};
@@ -10,7 +10,7 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::time;
-use tracing::error;
+use tracing::{error, warn};
 
 pub type Version = u8;
 pub type SecureStream = NoiseStream<TcpStream>;
@@ -118,9 +118,13 @@ pub async fn server_handshake(
     {
         Ok(stream) => match stream {
             Ok(mut stream) => {
-                if let Err(e) = set_tcp_opt(stream.get_inner(), nodelay, keepalive_secs, keepalive_interval)
-                {
-                    bail!("set noise option error: {e}")
+                if let Err(e) = set_tcp_opt(
+                    stream.get_inner(),
+                    nodelay,
+                    keepalive_secs,
+                    keepalive_interval,
+                ) {
+                    warn!("set noise option error: {e}")
                 }
                 read_client_version(&mut stream).await?;
                 write_and_flush(&mut stream, ServerResponse::Ok).await?;
@@ -145,8 +149,13 @@ pub async fn client_handshake(
         None => TcpStream::connect(server_address).await?,
     };
     let mut stream = initiator_handshake(stream, psk).await?;
-    if let Err(e) = set_tcp_opt(stream.get_inner(), nodelay, keepalive_secs, keepalive_interval) {
-        bail!("set tcp option error: {e:?}");
+    if let Err(e) = set_tcp_opt(
+        stream.get_inner(),
+        nodelay,
+        keepalive_secs,
+        keepalive_interval,
+    ) {
+        warn!("set tcp option error: {e:?}");
     }
     write_and_flush(&mut stream, ClientVersion::version()).await?;
     if !matches!(read_server_response(&mut stream).await?, ServerResponse::Ok) {

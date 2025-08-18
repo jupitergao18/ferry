@@ -4,8 +4,8 @@ use anyhow::Result;
 use tokio::signal;
 use tokio::sync::broadcast;
 use tracing::{error, info};
-use tracing_subscriber::fmt::time::ChronoLocal;
 use tracing_subscriber::EnvFilter;
+use tracing_subscriber::fmt::time::ChronoLocal;
 
 #[tokio::main]
 async fn main() -> Result<()> {

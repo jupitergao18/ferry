@@ -1,18 +1,18 @@
 use crate::config::{ClientConfig, ServiceConfig};
 use crate::protocol::{
-    client_handshake, read_server_request, read_server_response, write_and_flush, ClientRequest, ClientResponse,
-    SecureStream, ServerRequest, ServerResponse,
+    ClientRequest, ClientResponse, SecureStream, ServerRequest, ServerResponse, client_handshake,
+    read_server_request, read_server_response, write_and_flush,
 };
 use crate::set_tcp_opt;
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use backon::{BackoffBuilder, ExponentialBuilder};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::copy_bidirectional;
-use tokio::net::{lookup_host, TcpListener, TcpStream};
-use tokio::sync::{broadcast, mpsc, RwLock};
+use tokio::net::{TcpListener, TcpStream, lookup_host};
+use tokio::sync::{RwLock, broadcast, mpsc};
 use tokio::time;
 use tracing::{debug, error, info, warn};
 
@@ -178,6 +178,7 @@ impl Service {
                     let client_config = self.client_config.clone();
                     let server_socket_addr = self.server_socket_addr;
                     let service_stop_rx = service_stop_tx.subscribe();
+                    let service_name = self.service_name.clone();
                     tokio::spawn(async move {
                         debug!("Provider: Waiting server request");
                         if let Err(e) = handle_server_request(
@@ -186,6 +187,7 @@ impl Service {
                             client_config,
                             server_socket_addr,
                             service_stop_rx,
+                            service_name,
                         )
                         .await
                         {
@@ -238,7 +240,7 @@ impl Service {
                     }
                     }
                     _ = service_stop_rx.recv() => {
-                        info!("Service {} shutting down...", service_name);
+                        info!("Service consumer {} shutting down...", service_name);
                         break;
                     }
                     }
@@ -263,15 +265,28 @@ impl Service {
     }
 }
 
+/// 处理 Client Service Provider 服务端控制流
+/// 从服务端读取控制请求报错时， 返回 Err， 重启服务
+/// up stream 连接失败时，正常执行响应
+/// 设置流选项时报错 warn， 继续处理
+/// 安全连接握手时报错 error， 返回 Err，重启服务
+/// 向服务端提供新实例时报错， 返回 Err，重启服务
+/// 从服务端读取提供新实例返回时报错， 返回 Err，重启服务
+/// 向服务端返回提供新实例请求时报错， 返回 Err，重启服务
+/// 异步双向复制，不处理结果
 async fn handle_server_request(
     mut stream: SecureStream,
     service_config: ServiceConfig,
     client_config: ClientConfig,
     server_socket_addr: Option<SocketAddr>,
     mut service_stop_rx: broadcast::Receiver<()>,
+    service_name: String,
 ) -> Result<()> {
     let up_address = service_config.address.clone().unwrap();
-    let up_socket_addr = lookup_host(&up_address).await?.next();
+    let up_socket_addr = match lookup_host(&up_address).await {
+        Ok(mut addrs) => addrs.next(),
+        Err(_) => None,
+    };
     loop {
         tokio::select! {
             request = read_server_request(&mut stream) => {
@@ -298,9 +313,9 @@ async fn handle_server_request(
                             client_config.keepalive_secs,
                             client_config.keepalive_interval,
                         ) {
-                            error!("set tcp option error: {e:?}");
+                            warn!("set tcp option error: {e:?}");
                         }
-                        let mut data_stream = client_handshake(
+                        match client_handshake(
                             server_socket_addr,
                             &client_config.server_address,
                             &client_config.psk,
@@ -308,25 +323,31 @@ async fn handle_server_request(
                             client_config.keepalive_secs,
                             client_config.keepalive_interval,
                         )
-                        .await?;
-                        debug!("Provider: Provide new service instance");
-                        write_and_flush(&mut data_stream, ClientRequest::service_instance(nonce)).await?;
-                        if !matches!(
-                            read_server_response(&mut data_stream).await?,
-                            ServerResponse::Ok
-                        ) {
-                            bail!("unexpected server response")
+                        .await {
+                            Ok(mut data_stream) => {
+                                debug!("Provider: Provide new service instance");
+                                write_and_flush(&mut data_stream, ClientRequest::service_instance(nonce)).await?;
+                                if !matches!(
+                                    read_server_response(&mut data_stream).await?,
+                                    ServerResponse::Ok
+                                ) {
+                                    bail!("unexpected server response")
+                                }
+                                write_and_flush(&mut stream, ClientResponse::Ok).await?;
+                                debug!("Provider: copy_bidirectional");
+                                tokio::spawn(
+                                    async move { copy_bidirectional(&mut data_stream, &mut up_stream).await },
+                                );
+                            }
+                            Err(e) => {
+                                bail!("Consumer: handle server request handshake error: {e}");
+                            }
                         }
-                        write_and_flush(&mut stream, ClientResponse::Ok).await?;
-                        debug!("Provider: copy_bidirectional");
-                        tokio::spawn(
-                            async move { copy_bidirectional(&mut data_stream, &mut up_stream).await },
-                        );
                     }
                 }
             },
             _ = service_stop_rx.recv() => {
-                info!("Service shutting down...");
+                info!("Service provider {service_name} shutting down...");
                 break;
             }
         }
@@ -334,6 +355,12 @@ async fn handle_server_request(
     Ok(())
 }
 
+/// 处理 Client Service Consumer Listener 访问流
+/// 设置流选项时报错 warn， 继续处理
+/// 安全连接握手时报错 error， 返回OK，不重试
+/// 向服务端发送消费请求时报错 error，返回Err，不重试
+/// 从服务端读取消费请求返回时报错 error，返回Err，不重试
+/// 双向复制过程中报错返回Ok，不重试
 async fn handle_visitor_connection(
     mut visitor_stream: TcpStream,
     service_name: String,
@@ -347,9 +374,9 @@ async fn handle_visitor_connection(
         client_config.keepalive_secs,
         client_config.keepalive_interval,
     ) {
-        error!("set tcp option error: {e:?}");
+        warn!("set tcp option error: {e:?}");
     }
-    let mut data_stream = client_handshake(
+    match client_handshake(
         server_socket_addr,
         &client_config.server_address,
         &client_config.psk,
@@ -357,25 +384,32 @@ async fn handle_visitor_connection(
         client_config.keepalive_secs,
         client_config.keepalive_interval,
     )
-    .await?;
-    debug!("Consumer: Consume service: {service_name}");
-    write_and_flush(
-        &mut data_stream,
-        ClientRequest::consume_service(&service_name),
-    )
-    .await?;
+    .await
+    {
+        Ok(mut data_stream) => {
+            debug!("Consumer: Consuming service: {service_name}");
+            write_and_flush(
+                &mut data_stream,
+                ClientRequest::consume_service(&service_name),
+            )
+            .await?;
 
-    match read_server_response(&mut data_stream).await? {
-        ServerResponse::Ok => {
-            debug!("Consumer: copy_bidirectional");
-            copy_bidirectional(&mut data_stream, &mut visitor_stream).await?;
-            Ok(())
+            match read_server_response(&mut data_stream).await? {
+                ServerResponse::Ok => {
+                    debug!("Consumer: copy_bidirectional");
+                    _ = copy_bidirectional(&mut data_stream, &mut visitor_stream).await;
+                }
+                ServerResponse::UnknownService => {
+                    error!("server response: unknown service");
+                }
+                ServerResponse::NoProvider => {
+                    error!("server response: no provider");
+                }
+            }
         }
-        ServerResponse::UnknownService => {
-            bail!("server response: unknown service")
-        }
-        ServerResponse::NoProvider => {
-            bail!("server response: no provider")
+        Err(e) => {
+            error!("Consumer: handle visitor connection handshake error: {e}");
         }
     }
+    Ok(())
 }

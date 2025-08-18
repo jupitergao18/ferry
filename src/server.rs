@@ -1,7 +1,7 @@
 use crate::config::ServerConfig;
 use crate::protocol::{
-    read_client_request, read_client_response, server_handshake, write_and_flush, ClientRequest, ClientResponse,
-    NonceDigest, SecureStream, ServerRequest, ServerResponse, ServiceDigest,
+    ClientRequest, ClientResponse, NonceDigest, SecureStream, ServerRequest, ServerResponse,
+    ServiceDigest, read_client_request, read_client_response, server_handshake, write_and_flush,
 };
 use crate::{hash, set_tcp_opt};
 use anyhow::Result;
@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::copy_bidirectional;
 use tokio::net::TcpListener;
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::{RwLock, broadcast};
 use tokio::time;
 use tracing::{debug, error, info, warn};
 
@@ -64,7 +64,7 @@ impl Server {
                                     let server_config = self.config.clone();
                                     tokio::spawn(async move {
                                         if let Err(err) = handle_connection(stream, server_state, server_config).await {
-                                            error!("handle connection error: {err:#}");
+                                            warn!("handle connection error: {err:#}");
                                         }
                                     });
                                 }
@@ -97,17 +97,16 @@ async fn handle_connection(
                 "Server: Receive client provide service: {:?}",
                 hex::encode(service_digest)
             );
-            if !server_state
-                .digest_service
-                .read()
-                .await
-                .contains_key(&service_digest)
-            {
+            let digest_service = server_state.digest_service.read().await;
+            let service_name = digest_service.get(&service_digest);
+            if service_name.is_none() {
                 if let Err(e) = write_and_flush(&mut stream, ServerResponse::UnknownService).await {
                     error!("response to client error: {e:?}");
                 }
                 return Ok(());
             }
+            let service_name = service_name.unwrap().to_string();
+            debug!("Found service: {service_name}");
             if let Err(e) = write_and_flush(&mut stream, ServerResponse::Ok).await {
                 error!("response to client error: {e:?}");
             }
@@ -131,6 +130,7 @@ async fn handle_connection(
                 return Ok(());
             }
             let service_name = service_name.unwrap().to_string();
+            debug!("Found service: {service_name}");
             let mut digest_stream = server_state.digest_stream.write().await;
             if let Some(provider_stream) = digest_stream.get_mut(&service_digest) {
                 let consume_service_request = ServerRequest::consume_service();
@@ -139,13 +139,10 @@ async fn handle_connection(
                     .wait_stream
                     .write()
                     .await
-                    .insert(nonce, (stream, service_name));
-                debug!(
-                    "Server: Request client provide service instance: {:?}",
-                    hex::encode(nonce)
-                );
+                    .insert(nonce, (stream, service_name.clone()));
+                debug!("Server: Request client provide service instance: {service_name}");
                 if let Err(e) = write_and_flush(provider_stream, consume_service_request).await {
-                    error!("send to client error: {e:?}");
+                    error!("send to provider client error: {e:?}");
                 }
                 match read_client_response(provider_stream).await {
                     Ok(provider_response) => {
