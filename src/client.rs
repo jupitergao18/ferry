@@ -340,7 +340,7 @@ async fn handle_server_request(
                                 );
                             }
                             Err(e) => {
-                                bail!("Consumer: handle server request handshake error: {e}");
+                                bail!("Provider: handle server request handshake error: {e}");
                             }
                         }
                     }
