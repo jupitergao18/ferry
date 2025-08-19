@@ -113,7 +113,7 @@ impl Client {
         for (service_name, stop_tx) in service_stop_tx.iter() {
             info!("Service {service_name} shutting down");
             if let Err(e) = stop_tx.send(()).await {
-                error!("send service stop signal error: {e}");
+                error!("send service stop signal(client receive stop) error: {e}");
             }
         }
 
@@ -251,13 +251,13 @@ impl Service {
         tokio::select! {
             _ = self.stop_rx.recv() => {
                 if let Err(e) = service_stop_tx.send(()) {
-                    error!("send service stop signal error: {e}");
+                    error!("send service stop signal(service receive stop) error: {e}");
                 }
                 Ok(())
             },
             e = provider_error_rx.recv() => {
                 if let Err(e) = service_stop_tx.send(()) {
-                    error!("send service stop signal error: {e}");
+                    error!("send service stop signal(provider error) error: {e}");
                 }
                 bail!("{e:?}")
             }
