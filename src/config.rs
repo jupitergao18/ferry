@@ -43,6 +43,7 @@ pub struct ServerConfig {
 pub struct ClientConfig {
     pub server_address: String,
     pub psk: String,
+    pub proxy: Option<String>,
     pub service: HashMap<String, ServiceConfig>,
     #[serde(default = "default_heartbeat_timeout")]
     pub heartbeat_timeout: u64,

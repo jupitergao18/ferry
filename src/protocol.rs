@@ -1,6 +1,7 @@
 use crate::noise::{NoiseStream, initiator_handshake, responder_handshake};
+use crate::proxy::{Auth, http, socks5};
 use crate::{hash, set_tcp_opt};
-use anyhow::{Result, bail};
+use anyhow::{Result, anyhow, bail};
 use bincode::enc::write::SizeWriter;
 use bincode::{Decode, Encode};
 use rand::RngCore;
@@ -11,6 +12,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpStream, UdpSocket};
 use tokio::time;
 use tracing::{error, trace, warn};
+use url::Url;
 
 pub type Version = u8;
 pub type SecureStream = NoiseStream<TcpStream>;
@@ -141,14 +143,46 @@ pub async fn server_handshake(
 pub async fn client_handshake(
     server_socket_addr: Option<SocketAddr>,
     server_address: &str,
+    proxy: &Option<String>,
     psk: &str,
     nodelay: bool,
     keepalive_secs: u64,
     keepalive_interval: u64,
 ) -> Result<SecureStream> {
-    let stream = match server_socket_addr {
-        Some(s) => TcpStream::connect(s).await?,
-        None => TcpStream::connect(server_address).await?,
+    let stream = if let Some(proxy) = proxy {
+        let proxy = Url::parse(proxy)?;
+        let mut proxy_stream = TcpStream::connect((
+            proxy.host_str().expect("proxy url should have host field"),
+            proxy.port().expect("proxy url should have port field"),
+        ))
+        .await?;
+        let auth = if !proxy.username().is_empty() || proxy.password().is_some() {
+            Some(Auth::new(
+                proxy.username().to_string(),
+                proxy.password().unwrap_or("").to_string(),
+            ))
+        } else {
+            None
+        };
+        let semi = server_address
+            .rfind(':')
+            .ok_or(anyhow!("missing semicolon"))?;
+        let host = &server_address[..semi];
+        let port = server_address[semi + 1..].parse()?;
+        match proxy.scheme() {
+            "socks5" => {
+                socks5::connect(&mut proxy_stream, (host, port), auth).await?;
+            }
+            "http" => {
+                http::connect(&mut proxy_stream, (host, port), auth).await?;
+            }
+            _ => panic!("unknown proxy scheme"),
+        }
+        proxy_stream
+    } else if let Some(s) = server_socket_addr {
+        TcpStream::connect(s).await?
+    } else {
+        TcpStream::connect(server_address).await?
     };
     let mut stream = initiator_handshake(stream, psk).await?;
     if let Err(e) = set_tcp_opt(

@@ -14,6 +14,7 @@ mod noise;
 mod server;
 // mod service;
 mod protocol;
+mod proxy;
 
 pub async fn run(config_path: PathBuf, ctrlc_tx: broadcast::Sender<bool>) -> Result<()> {
     if let Err(e) = fdlimit::raise_fd_limit() {

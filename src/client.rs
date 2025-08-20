@@ -159,6 +159,7 @@ impl Service {
             let mut stream = client_handshake(
                 self.server_socket_addr,
                 &self.client_config.server_address,
+                &self.client_config.proxy,
                 &self.client_config.psk,
                 self.service_config
                     .nodelay
@@ -259,6 +260,7 @@ impl Service {
                     let mut data_stream = match client_handshake(
                         server_socket_addr,
                         &client_config.server_address,
+                        &client_config.proxy,
                         &client_config.psk,
                         service_config.nodelay.unwrap_or(client_config.nodelay),
                         client_config.keepalive_secs,
@@ -372,6 +374,7 @@ async fn handle_server_request(
                                 match client_handshake(
                                     server_socket_addr,
                                     &client_config.server_address,
+                                    &client_config.proxy,
                                     &client_config.psk,
                                     service_config.nodelay.unwrap_or(client_config.nodelay),
                                     client_config.keepalive_secs,
@@ -407,6 +410,7 @@ async fn handle_server_request(
                                 match client_handshake(
                                     server_socket_addr,
                                     &client_config.server_address,
+                                    &client_config.proxy,
                                     &client_config.psk,
                                     service_config.nodelay.unwrap_or(client_config.nodelay),
                                     client_config.keepalive_secs,
@@ -472,6 +476,7 @@ async fn handle_visitor_connection_tcp(
     match client_handshake(
         server_socket_addr,
         &client_config.server_address,
+        &client_config.proxy,
         &client_config.psk,
         service_config.nodelay.unwrap_or(client_config.nodelay),
         client_config.keepalive_secs,
