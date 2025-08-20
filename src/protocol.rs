@@ -7,10 +7,10 @@ use rand::RngCore;
 use std::net::SocketAddr;
 use std::sync::LazyLock;
 use std::time::Duration;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::net::{TcpStream, UdpSocket};
 use tokio::time;
-use tracing::{error, warn};
+use tracing::{error, trace, warn};
 
 pub type Version = u8;
 pub type SecureStream = NoiseStream<TcpStream>;
@@ -20,6 +20,8 @@ pub type NonceDigest = [u8; 32];
 pub const VERSION: Version = 1;
 
 const HANDSHAKE_TIMEOUT: u64 = 5;
+
+const UDP_MTU: usize = 2048;
 
 #[derive(Encode, Decode)]
 pub enum ClientVersion {
@@ -225,4 +227,87 @@ pub async fn read_client_response(stream: &mut SecureStream) -> Result<ClientRes
     let mut buf = vec![0u8; SIZE.client_response];
     stream.read_exact(&mut buf).await?;
     decode::<ClientResponse>(&buf)
+}
+
+type UdpPacketLen = u16; // `u16` should be enough for any practical UDP traffic on the Internet
+#[derive(Encode, Decode, Debug)]
+struct UdpHeader {
+    from: SocketAddr,
+    len: UdpPacketLen,
+}
+
+pub async fn udp_write_slice<T: AsyncWrite + Unpin>(
+    writer: &mut T,
+    from: SocketAddr,
+    data: &[u8],
+) -> Result<()> {
+    let hdr = UdpHeader {
+        from,
+        len: data.len() as UdpPacketLen,
+    };
+    let hdr_bin = encode(&hdr);
+    writer.write_u8(hdr_bin.len() as u8).await?;
+    writer.write_all(&hdr_bin).await?;
+    writer.write_all(data).await?;
+    writer.flush().await?;
+    Ok(())
+}
+
+pub async fn udp_read<T: AsyncRead + Unpin>(
+    reader: &mut T,
+    hdr_len: u8,
+) -> Result<(SocketAddr, Vec<u8>)> {
+    let mut buf = vec![0; hdr_len as usize];
+    reader.read_exact(&mut buf).await?;
+    let hdr = decode::<UdpHeader>(&buf)?;
+    let mut data = vec![0; hdr.len as usize];
+    reader.read_exact(&mut data).await?;
+    Ok((hdr.from, data))
+}
+
+pub async fn udp_copy_provider(udp_socket: &UdpSocket, stream: &mut SecureStream) -> Result<()> {
+    let mut buf = [0u8; UDP_MTU];
+    let mut from = None;
+    loop {
+        tokio::select! {
+            // read from upstream
+            val = udp_socket.recv(&mut buf) => {
+                let n= val?;
+                trace!("udp->stream: {n} bytes: {:?}",&buf[..n]);
+                //send to consumer
+                if let Some(from) = from {
+                    udp_write_slice(stream, from, &buf[..n]).await?;
+                }
+            },
+            // read from consumer
+            hdr_len = stream.read_u8() => {
+                let (new_from, data) = udp_read(stream, hdr_len?).await?;
+                from = Some(new_from);
+                trace!("stream->udp: {} bytes: {:?}",data.len(), data);
+                //send to upstream
+                udp_socket.send(&data).await?;
+            }
+        }
+    }
+}
+
+pub async fn udp_copy_consumer(udp_socket: &UdpSocket, stream: &mut SecureStream) -> Result<()> {
+    let mut buf = [0u8; UDP_MTU];
+    loop {
+        tokio::select! {
+            //read from visitor
+            val = udp_socket.recv_from(&mut buf) => {
+                let (n, from) = val?;
+                trace!("udp->stream: {n} bytes: {:?}",&buf[..n]);
+                // send to provider
+                udp_write_slice(stream, from, &buf[..n]).await?;
+            },
+            //read from provider
+            hdr_len = stream.read_u8() => {
+                let (from, data) = udp_read(stream, hdr_len?).await?;
+                trace!("stream->udp: {} bytes: {:?}",data.len(), data);
+                udp_socket.send_to(&data, from).await?;
+            }
+        }
+    }
 }

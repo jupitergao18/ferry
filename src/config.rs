@@ -56,12 +56,27 @@ pub struct ClientConfig {
     pub keepalive_interval: u64,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, Default)]
+pub enum ServiceType {
+    #[serde(rename = "tcp")]
+    #[default]
+    Tcp,
+    #[serde(rename = "udp")]
+    Udp,
+}
+
+fn default_service_type() -> ServiceType {
+    Default::default()
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ServiceConfig {
     pub bind_address: Option<String>, // consumer
     pub address: Option<String>,      // provider
     pub nodelay: Option<bool>,        // provider and consumer
     pub retry_interval: Option<u64>,  // provider
+    #[serde(default = "default_service_type")]
+    pub service_type: ServiceType,
 }
 
 fn default_heartbeat_interval() -> u64 {

@@ -14,7 +14,6 @@
 ## Hot Reload
 
 ## Todo
-### udp
 ### via proxy
 ### Windows service
 ### web admin
