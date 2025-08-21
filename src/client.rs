@@ -6,7 +6,7 @@ use crate::protocol::{
 };
 use crate::set_tcp_opt;
 use anyhow::{Result, anyhow, bail};
-use backon::{BackoffBuilder, ExponentialBuilder};
+use futures_util::future::join_all;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -42,25 +42,21 @@ impl Client {
     }
 
     pub async fn run(&mut self, mut stop_rx: broadcast::Receiver<()>) -> Result<()> {
+        let mut tasks = vec![];
         for (service_name, service_config) in &self.config.service {
             if service_config.address.is_some() || service_config.bind_address.is_some() {
-                let retry_backoff_builder = ExponentialBuilder::new()
-                    .with_jitter()
-                    .with_max_delay(Duration::from_secs(
-                        service_config
-                            .retry_interval
-                            .unwrap_or(self.config.retry_interval),
-                    ))
-                    .without_max_times();
+                let retry_interval = Duration::from_secs(
+                    service_config
+                        .retry_interval
+                        .unwrap_or(self.config.retry_interval),
+                );
                 let service_name = service_name.clone();
                 let service_config = service_config.clone();
                 let config = self.config.clone();
                 let state = self.state.clone();
                 let server_socket_addr = self.server_socket_addr;
 
-                tokio::spawn(async move {
-                    let mut start = time::Instant::now();
-                    let mut retry_backoff = retry_backoff_builder.build();
+                let task = tokio::spawn(async move {
                     loop {
                         let (service_stop_tx, service_stop_rx) = mpsc::channel::<()>(1);
                         match Service::from_config(
@@ -77,25 +73,10 @@ impl Client {
                                     .await
                                     .insert(service_name.clone(), service_stop_tx);
                                 if let Err(e) = service.run().await {
-                                    if service.stop_rx.try_recv()
-                                        != Err(mpsc::error::TryRecvError::Empty)
-                                    {
-                                        break;
-                                    }
-
-                                    if start.elapsed() > Duration::from_secs(3) {
-                                        retry_backoff = retry_backoff_builder.build();
-                                    }
-
-                                    if let Some(duration) = retry_backoff.next() {
-                                        error!("Service error {e}. Retry in {duration:?}...");
-                                        time::sleep(duration).await;
-                                    } else {
-                                        // Should never reach
-                                        panic!("Retry Break, error: {:?}", e);
-                                    }
-
-                                    start = time::Instant::now();
+                                    error!("Service error {e}. Retry in {retry_interval:?}...");
+                                    time::sleep(retry_interval).await;
+                                } else {
+                                    break;
                                 }
                             }
                             Err(e) => {
@@ -105,20 +86,27 @@ impl Client {
                         }
                     }
                 });
+                tasks.push(task);
             }
         }
 
         _ = stop_rx.recv().await;
 
+        info!("Client shutting down...");
+
+        debug!("wait {} service(s) task...", tasks.len());
         let service_stop_tx = self.state.service_stop_tx.read().await;
+        debug!("find {} service(s)...", service_stop_tx.len());
         for (service_name, stop_tx) in service_stop_tx.iter() {
-            info!("Service {service_name} shutting down");
+            debug!("sending stop signal to service {} ...", service_name);
             if let Err(e) = stop_tx.send(()).await {
                 error!("send service stop signal(client receive stop) error: {e}");
             }
         }
+        debug!("all sent, wait {} service(s) task...", tasks.len());
+        join_all(tasks).await;
 
-        info!("Client shutting down...");
+        info!("Client shutdown");
 
         Ok(())
     }
@@ -153,8 +141,10 @@ impl Service {
         if self.service_config.bind_address.is_none() && self.service_config.address.is_none() {
             bail!("both of bind_address and address unset")
         }
+        let mut tasks = vec![];
         let (service_stop_tx, _) = broadcast::channel::<()>(1);
         let (provider_error_tx, mut provider_error_rx) = mpsc::unbounded_channel::<String>();
+        let (udp_error_tx, mut udp_error_rx) = mpsc::unbounded_channel::<String>();
         if self.service_config.address.is_some() {
             let mut stream = client_handshake(
                 self.server_socket_addr,
@@ -181,7 +171,7 @@ impl Service {
                     let server_socket_addr = self.server_socket_addr;
                     let service_stop_rx = service_stop_tx.subscribe();
                     let service_name = self.service_name.clone();
-                    tokio::spawn(async move {
+                    let task = tokio::spawn(async move {
                         debug!("Provider: Waiting server request");
                         if let Err(e) = handle_server_request(
                             stream,
@@ -199,6 +189,7 @@ impl Service {
                             }
                         }
                     });
+                    tasks.push(task);
                 }
                 ServerResponse::UnknownService => {
                     bail!("server response unknown service: {}", self.service_name)
@@ -221,7 +212,7 @@ impl Service {
                         "listening on {bind_address}(tcp) for service {}",
                         self.service_name
                     );
-                    tokio::spawn(async move {
+                    let task = tokio::spawn(async move {
                         loop {
                             tokio::select! {
                             accept_result = listener.accept() => {
@@ -250,6 +241,7 @@ impl Service {
                             }
                         }
                     });
+                    tasks.push(task);
                 }
                 ServiceType::Udp => {
                     let udp_socket = UdpSocket::bind(bind_address).await?;
@@ -294,27 +286,47 @@ impl Service {
                         )),
                     }?;
                     debug!("Consumer: udp_copy");
-                    tokio::spawn(
-                        async move { udp_copy_consumer(&udp_socket, &mut data_stream).await },
-                    );
+                    let task = tokio::spawn(async move {
+                        if let Err(e) =
+                            udp_copy_consumer(&udp_socket, &mut data_stream, service_stop_rx).await
+                        {
+                            error!("Consumer: udp copy error: {e:?}");
+                            if let Err(e) = udp_error_tx.send(e.to_string()) {
+                                error!("send udp error signal error: {e:?}");
+                            }
+                        }
+                    });
+                    tasks.push(task);
                 }
             }
         }
 
-        tokio::select! {
+        let result = tokio::select! {
             _ = self.stop_rx.recv() => {
+                info!("Service {} shutting down", self.service_name);
                 if let Err(e) = service_stop_tx.send(()) {
                     error!("send service stop signal(service receive stop) error: {e}");
                 }
                 Ok(())
             },
             e = provider_error_rx.recv() => {
+                info!("Service {} shutting down with provider error {e:?}", self.service_name);
                 if let Err(e) = service_stop_tx.send(()) {
                     error!("send service stop signal(provider error) error: {e}");
                 }
                 bail!("{e:?}")
+            },
+            e = udp_error_rx.recv() => {
+                info!("Service {} shutting down with udp error {e:?}", self.service_name);
+                if let Err(e) = service_stop_tx.send(()) {
+                    error!("send service stop signal(udp error) error: {e}");
+                }
+                bail!("{e:?}")
             }
-        }
+        };
+        join_all(tasks).await;
+        info!("Service {} shutdown", self.service_name);
+        result
     }
 }
 

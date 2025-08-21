@@ -2,10 +2,12 @@ use crate::client::Client;
 use crate::config::{Config, ConfigChangeEvent};
 use crate::server::Server;
 use anyhow::Result;
+use futures_util::future::join_all;
 use std::path::PathBuf;
 use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio::sync::{broadcast, mpsc};
+use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
 mod client;
@@ -26,6 +28,7 @@ pub async fn run(config_path: PathBuf, ctrlc_tx: broadcast::Sender<bool>) -> Res
     tokio::spawn(async move { config::watch(config_path, config_change_tx, ctrlc_rx).await });
 
     let mut instance_stop_tx: Option<broadcast::Sender<()>> = None;
+    let mut instance_task: Option<JoinHandle<Result<()>>> = None;
 
     while let Some(change_event) = config_change_rx.recv().await {
         match change_event {
@@ -37,13 +40,17 @@ pub async fn run(config_path: PathBuf, ctrlc_tx: broadcast::Sender<bool>) -> Res
                         error!("Stop previous instance error: {e:?}");
                         break;
                     }
+                    if let Some(task) = instance_task {
+                        _ = task.await;
+                    }
                 }
 
                 let (stop_tx, _) = broadcast::channel::<()>(1024);
                 let new_instance = Instance::new(config, stop_tx.clone());
-                tokio::spawn(async move { new_instance.run().await });
+                let new_task = tokio::spawn(async move { new_instance.run().await });
 
                 instance_stop_tx = Some(stop_tx);
+                instance_task = Some(new_task);
             }
         }
     }
@@ -52,6 +59,10 @@ pub async fn run(config_path: PathBuf, ctrlc_tx: broadcast::Sender<bool>) -> Res
         && let Err(e) = stop_tx.send(())
     {
         error!("Stop instance error: {e:?}");
+    }
+
+    if let Some(task) = instance_task {
+        _ = task.await;
     }
 
     Ok(())
@@ -69,21 +80,27 @@ impl Instance {
     }
 
     async fn run(&self) -> Result<()> {
+        let mut tasks = vec![];
         let server_stop_rx = self.stop_tx.subscribe();
         if let Some(server_config) = self.config.server.clone() {
             let mut server = Server::from_config(server_config)?;
-            tokio::spawn(async move { server.run(server_stop_rx).await });
+            let task = tokio::spawn(async move { server.run(server_stop_rx).await });
+            tasks.push(task);
         }
 
         for client_config in self.config.clients.clone() {
             let client_stop_rx = self.stop_tx.subscribe();
             let mut client = Client::from_config(client_config).await?;
-            tokio::spawn(async move { client.run(client_stop_rx).await });
+            let task = tokio::spawn(async move { client.run(client_stop_rx).await });
+            tasks.push(task);
         }
 
         if let Err(e) = self.stop_tx.subscribe().recv().await {
             error!("instance stop signal receive error: {e:?}");
         }
+        info!("Instance shutting down...");
+
+        join_all(tasks).await;
 
         info!("Instance shutdown");
 

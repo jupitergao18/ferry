@@ -6,7 +6,6 @@ edition = "2024"
 [dependencies]
 anyhow = "1.0.99"
 atty = "0.2.14"
-backon = "1.5.2"
 bincode = "2.0.1"
 fdlimit = "0.3.0"
 hex = "0.4.3"

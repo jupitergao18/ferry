@@ -10,6 +10,7 @@ use std::sync::LazyLock;
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpStream, UdpSocket};
+use tokio::sync::broadcast;
 use tokio::time;
 use tracing::{error, trace, warn};
 use url::Url;
@@ -325,7 +326,11 @@ pub async fn udp_copy_provider(udp_socket: &UdpSocket, stream: &mut SecureStream
     }
 }
 
-pub async fn udp_copy_consumer(udp_socket: &UdpSocket, stream: &mut SecureStream) -> Result<()> {
+pub async fn udp_copy_consumer(
+    udp_socket: &UdpSocket,
+    stream: &mut SecureStream,
+    mut stop_rx: broadcast::Receiver<()>,
+) -> Result<()> {
     let mut buf = [0u8; UDP_MTU];
     loop {
         tokio::select! {
@@ -341,6 +346,9 @@ pub async fn udp_copy_consumer(udp_socket: &UdpSocket, stream: &mut SecureStream
                 let (from, data) = udp_read(stream, hdr_len?).await?;
                 trace!("stream->udp: {} bytes: {:?}",data.len(), data);
                 udp_socket.send_to(&data, from).await?;
+            },
+            _ = stop_rx.recv() => {
+                break Ok(());
             }
         }
     }

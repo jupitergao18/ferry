@@ -14,7 +14,8 @@
 ## Hot Reload
 
 ## Todo
-### via proxy
+### log 
+### config hot reload
 ### Windows service
 ### web admin
 ### android/ios client

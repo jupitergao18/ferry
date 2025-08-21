@@ -82,6 +82,8 @@ impl Server {
             }
         }
 
+        info!("Server shutdown");
+
         Ok(())
     }
 }
