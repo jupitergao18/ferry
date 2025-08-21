@@ -1,7 +1,7 @@
 use crate::noise::{NoiseStream, initiator_handshake, responder_handshake};
-use crate::proxy::{Auth, http, socks5};
+use crate::proxy::proxy_stream;
 use crate::{hash, set_tcp_opt};
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Result, bail};
 use bincode::enc::write::SizeWriter;
 use bincode::{Decode, Encode};
 use rand::RngCore;
@@ -13,7 +13,6 @@ use tokio::net::{TcpStream, UdpSocket};
 use tokio::sync::broadcast;
 use tokio::time;
 use tracing::{error, trace, warn};
-use url::Url;
 
 pub type Version = u8;
 pub type SecureStream = NoiseStream<TcpStream>;
@@ -151,35 +150,7 @@ pub async fn client_handshake(
     keepalive_interval: u64,
 ) -> Result<SecureStream> {
     let stream = if let Some(proxy) = proxy {
-        let proxy = Url::parse(proxy)?;
-        let mut proxy_stream = TcpStream::connect((
-            proxy.host_str().expect("proxy url should have host field"),
-            proxy.port().expect("proxy url should have port field"),
-        ))
-        .await?;
-        let auth = if !proxy.username().is_empty() || proxy.password().is_some() {
-            Some(Auth::new(
-                proxy.username().to_string(),
-                proxy.password().unwrap_or("").to_string(),
-            ))
-        } else {
-            None
-        };
-        let semi = server_address
-            .rfind(':')
-            .ok_or(anyhow!("missing semicolon"))?;
-        let host = &server_address[..semi];
-        let port = server_address[semi + 1..].parse()?;
-        match proxy.scheme() {
-            "socks5" => {
-                socks5::connect(&mut proxy_stream, (host, port), auth).await?;
-            }
-            "http" => {
-                http::connect(&mut proxy_stream, (host, port), auth).await?;
-            }
-            _ => panic!("unknown proxy scheme"),
-        }
-        proxy_stream
+        proxy_stream(proxy, server_address).await?
     } else if let Some(s) = server_socket_addr {
         TcpStream::connect(s).await?
     } else {

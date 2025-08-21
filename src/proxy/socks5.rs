@@ -8,10 +8,7 @@ use tokio::{
     io,
     io::{AsyncReadExt, AsyncWriteExt},
 };
-// Error and Result
-// *****************************************************************************
 
-/// The library's error type.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("{0}")]
@@ -48,10 +45,6 @@ pub enum Error {
     TooLongString(StringKind),
 }
 
-/// Required to mark which string is too long.
-/// See [`Error::TooLongString`].
-///
-/// [`Error::TooLongString`]: enum.Error.html#variant.TooLongString
 #[derive(Debug, Eq, PartialEq, Copy, Clone, Hash)]
 pub enum StringKind {
     Domain,
@@ -59,7 +52,6 @@ pub enum StringKind {
     Password,
 }
 
-/// The library's `Result` type alias.
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 // Utilities
@@ -449,10 +441,13 @@ impl From<SocketAddrV6> for AddrKind {
     }
 }
 
-pub async fn connect<S, A>(socket: &mut S, addr: A, auth: Option<Auth>) -> Result<AddrKind>
+pub async fn connect<S>(
+    socket: &mut S,
+    (host, port): (&str, u16),
+    auth: Option<Auth>,
+) -> Result<AddrKind>
 where
     S: AsyncWriteExt + AsyncReadExt + Send + Unpin,
-    A: Into<AddrKind>,
 {
-    init(socket, Command::Connect, addr, auth).await
+    init(socket, Command::Connect, (host, port), auth).await
 }
