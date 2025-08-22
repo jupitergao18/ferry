@@ -54,9 +54,6 @@ pub enum StringKind {
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
-// Utilities
-// *****************************************************************************
-
 trait ReadExt: AsyncReadExt + Unpin {
     async fn read_version(&mut self) -> Result<()> {
         let value = self.read_u8().await?;
@@ -342,10 +339,6 @@ where
     stream.read_final().await
 }
 
-// Types
-// *****************************************************************************
-
-/// A proxy authentication method.
 #[derive(Debug, Eq, PartialEq, Copy, Clone, Hash)]
 pub enum AuthMethod {
     /// No authentication required.
@@ -370,7 +363,6 @@ enum Atyp {
     V6 = 0x4,
 }
 
-/// An unsuccessful reply from a proxy server.
 #[derive(Debug, Eq, PartialEq, Copy, Clone, Hash)]
 pub enum UnsuccessfulReply {
     GeneralFailure,
@@ -384,9 +376,6 @@ pub enum UnsuccessfulReply {
     Unassigned(u8),
 }
 
-/// Either [`SocketAddr`] or a domain and a port.
-///
-/// [`SocketAddr`]: https://doc.rust-lang.org/std/net/enum.SocketAddr.html
 #[derive(Debug, Eq, PartialEq, Clone, Hash)]
 pub enum AddrKind {
     Ip(SocketAddr),

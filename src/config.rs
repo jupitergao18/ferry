@@ -72,10 +72,10 @@ fn default_service_type() -> ServiceType {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ServiceConfig {
-    pub bind_address: Option<String>, // consumer
-    pub address: Option<String>,      // provider
-    pub nodelay: Option<bool>,        // provider and consumer
-    pub retry_interval: Option<u64>,  // provider
+    pub bind_address: Option<String>, // consumer only
+    pub address: Option<String>,      // provider only
+    pub nodelay: Option<bool>,
+    pub retry_interval: Option<u64>,
     #[serde(default = "default_service_type")]
     pub service_type: ServiceType,
 }

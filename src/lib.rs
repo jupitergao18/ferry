@@ -4,16 +4,17 @@ use crate::server::Server;
 use anyhow::Result;
 use futures_util::future::join_all;
 use std::path::PathBuf;
+use std::time::Duration;
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
+use tokio::time::Instant;
 use tracing::{debug, error, info, warn};
 
 mod client;
 mod config;
-mod server;
-// protocol service;
 mod protocol;
 mod proxy;
+mod server;
 
 pub async fn run(config_path: PathBuf, ctrlc_tx: broadcast::Sender<bool>) -> Result<()> {
     if let Err(e) = fdlimit::raise_fd_limit() {
@@ -26,8 +27,16 @@ pub async fn run(config_path: PathBuf, ctrlc_tx: broadcast::Sender<bool>) -> Res
 
     let mut instance_stop_tx: Option<broadcast::Sender<()>> = None;
     let mut instance_task: Option<JoinHandle<Result<()>>> = None;
+    let mut last_change: Option<Instant> = None;
 
     while let Some(change_event) = config_change_rx.recv().await {
+        if let Some(change_time) = last_change
+            && change_time.elapsed() < Duration::from_secs(5)
+        {
+            debug!("Config file changed again in 5s, omitted");
+            continue;
+        }
+        last_change = Some(Instant::now());
         match change_event {
             ConfigChangeEvent::FullRestart(config) => {
                 if instance_stop_tx.is_some() {
@@ -108,9 +117,4 @@ impl Instance {
 
         Ok(())
     }
-
-    // fn config_change(&mut self, config: Config, _change: ConfigChangeEvent) -> Result<()> {
-    //     self.config = config;
-    //     Ok(())
-    // }
 }

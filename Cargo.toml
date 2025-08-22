@@ -21,7 +21,7 @@ tracing-subscriber = { version = "0.3.19", features = ["chrono"] }
 futures-util = "0.3.31"
 pin-project = "1.1.10"
 socket2 = { version = "0.6.0", features = ["all"] }
-url = "2.5.4"
+url = "2.5.6"
 thiserror = "2.0.16"
 httparse = "1.10.1"
 base64 = "0.22.1"
@@ -30,7 +30,8 @@ base64 = "0.22.1"
 panic = "abort"
 
 [profile.release]
-panic = "abort"
-lto = true
+opt-level = 3
 codegen-units = 1
+lto = true
 strip = true
+panic = "abort"
