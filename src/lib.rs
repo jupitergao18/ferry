@@ -4,17 +4,14 @@ use crate::server::Server;
 use anyhow::Result;
 use futures_util::future::join_all;
 use std::path::PathBuf;
-use std::time::Duration;
-use tokio::net::TcpStream;
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 mod client;
 mod config;
-mod noise;
 mod server;
-// mod service;
+// protocol service;
 mod protocol;
 mod proxy;
 
@@ -33,11 +30,15 @@ pub async fn run(config_path: PathBuf, ctrlc_tx: broadcast::Sender<bool>) -> Res
     while let Some(change_event) = config_change_rx.recv().await {
         match change_event {
             ConfigChangeEvent::FullRestart(config) => {
-                info!("ConfigChangeEvent::FullRestart");
+                if instance_stop_tx.is_some() {
+                    info!("Config file changed, restarting...");
+                } else {
+                    info!("Config file loaded, starting...");
+                }
                 if let Some(previous_stop_tx) = &instance_stop_tx {
-                    info!("Sending stop signal");
+                    debug!("Sending stop signal");
                     if let Err(e) = previous_stop_tx.send(()) {
-                        error!("Stop previous instance error: {e:?}");
+                        error!("Previous instance stop signal send error: {e:?}");
                         break;
                     }
                     if let Some(task) = instance_task {
@@ -58,7 +59,7 @@ pub async fn run(config_path: PathBuf, ctrlc_tx: broadcast::Sender<bool>) -> Res
     if let Some(stop_tx) = &instance_stop_tx
         && let Err(e) = stop_tx.send(())
     {
-        error!("Stop instance error: {e:?}");
+        error!("Instance shutdown error: {e:?}");
     }
 
     if let Some(task) = instance_task {
@@ -75,11 +76,11 @@ struct Instance {
 
 impl Instance {
     fn new(config: Config, stop_tx: broadcast::Sender<()>) -> Self {
-        info!("Instance created");
         Self { config, stop_tx }
     }
 
     async fn run(&self) -> Result<()> {
+        info!("Instance starting...");
         let mut tasks = vec![];
         let server_stop_rx = self.stop_tx.subscribe();
         if let Some(server_config) = self.config.server.clone() {
@@ -94,6 +95,7 @@ impl Instance {
             let task = tokio::spawn(async move { client.run(client_stop_rx).await });
             tasks.push(task);
         }
+        info!("Instance started");
 
         if let Err(e) = self.stop_tx.subscribe().recv().await {
             error!("instance stop signal receive error: {e:?}");
@@ -111,26 +113,4 @@ impl Instance {
     //     self.config = config;
     //     Ok(())
     // }
-}
-
-pub fn hash(input: &str) -> [u8; 32] {
-    use sha2::{Digest, Sha256};
-    let digest = Sha256::digest(input);
-    let mut hash = [0u8; 32];
-    hash.copy_from_slice(&digest);
-    hash
-}
-
-pub fn set_tcp_opt(
-    stream: &TcpStream,
-    nodelay: bool,
-    keepalive_secs: u64,
-    keepalive_interval: u64,
-) -> Result<()> {
-    let s = stream;
-    s.set_nodelay(nodelay)?;
-    let keepalive = socket2::TcpKeepalive::new()
-        .with_time(Duration::from_secs(keepalive_secs))
-        .with_interval(Duration::from_secs(keepalive_interval));
-    Ok(socket2::SockRef::from(s).set_tcp_keepalive(&keepalive)?)
 }

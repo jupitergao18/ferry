@@ -1,9 +1,9 @@
 use crate::config::ServerConfig;
 use crate::protocol::{
     ClientRequest, ClientResponse, NonceDigest, SecureStream, ServerRequest, ServerResponse,
-    ServiceDigest, read_client_request, read_client_response, server_handshake, write_and_flush,
+    ServiceDigest, hash, read_client_request, read_client_response, server_handshake, set_tcp_opt,
+    write_and_flush,
 };
-use crate::{hash, set_tcp_opt};
 use anyhow::Result;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -44,32 +44,33 @@ impl Server {
     }
 
     pub async fn run(&mut self, mut stop_rx: broadcast::Receiver<()>) -> Result<()> {
+        info!("Server starting...");
         let bind_address = &self.config.bind_address;
         let listener = TcpListener::bind(bind_address).await?;
-        info!("listening on {bind_address}");
+        info!("Server started, listening on {bind_address}");
 
         loop {
             tokio::select! {
                 accept_result = listener.accept() => {
                     match accept_result {
                         Err(e) => {
-                            warn!("accept error: {e}, sleep 100ms");
+                            warn!("Server: accept error: {e}, sleep 100ms");
                             time::sleep(Duration::from_millis(100)).await;
                         }
                         Ok((conn, addr)) => {
-                            info!("Incoming connection from {addr}");
+                            debug!("Server: incoming connection from {addr}");
                             match server_handshake(conn, &self.config.psk, self.config.nodelay, self.config.keepalive_secs, self.config.keepalive_interval).await {
                                 Ok(stream) => {
                                     let server_state = self.state.clone();
                                     let server_config = self.config.clone();
                                     tokio::spawn(async move {
-                                        if let Err(err) = handle_connection(stream, server_state, server_config).await {
-                                            warn!("handle connection error: {err:#}");
+                                        if let Err(e) = handle_connection(stream, server_state, server_config).await {
+                                            warn!("Server: handle connection error: {e}");
                                         }
                                     });
                                 }
                                 Err(e) => {
-                                    warn!("handshake error: {e}");
+                                    warn!("Server: handshake error: {e}");
                                 }
                             }
                         }
@@ -96,31 +97,32 @@ async fn handle_connection(
     match read_client_request(&mut stream).await? {
         ClientRequest::ProvideService(service_digest) => {
             debug!(
-                "Server: Receive client provide service: {:?}",
+                "Server: client provide service: {:?}",
                 hex::encode(service_digest)
             );
             let digest_service = server_state.digest_service.read().await;
             let service_name = digest_service.get(&service_digest);
             if service_name.is_none() {
                 if let Err(e) = write_and_flush(&mut stream, ServerResponse::UnknownService).await {
-                    error!("response to client error: {e:?}");
+                    warn!("Server: response UnknownService to client error: {e:?}");
                 }
                 return Ok(());
             }
             let service_name = service_name.unwrap().to_string();
-            debug!("Found service: {service_name}");
+            debug!("Server: found service: {service_name}");
             if let Err(e) = write_and_flush(&mut stream, ServerResponse::Ok).await {
-                error!("response to client error: {e:?}");
+                warn!("Server: response Ok to client error: {e:?}");
             }
             server_state
                 .digest_stream
                 .write()
                 .await
                 .insert(service_digest, stream);
+            debug!("Server: provider stream saved: {service_name}");
         }
         ClientRequest::ConsumeService(service_digest) => {
             debug!(
-                "Server: Receive client consume service: {:?}",
+                "Server: client consume service: {:?}",
                 hex::encode(service_digest)
             );
             let digest_service = server_state.digest_service.read().await;
@@ -132,9 +134,10 @@ async fn handle_connection(
                 return Ok(());
             }
             let service_name = service_name.unwrap().to_string();
-            debug!("Found service: {service_name}");
+            debug!("Server: found service: {service_name}");
             let mut digest_stream = server_state.digest_stream.write().await;
             if let Some(provider_stream) = digest_stream.get_mut(&service_digest) {
+                debug!("Server: found provider");
                 let consume_service_request = ServerRequest::consume_service();
                 let ServerRequest::ConsumeService(nonce) = consume_service_request;
                 server_state
@@ -142,26 +145,26 @@ async fn handle_connection(
                     .write()
                     .await
                     .insert(nonce, (stream, service_name.clone()));
-                debug!("Server: Request client provide service instance: {service_name}");
+                debug!("Server: request provider instance: {service_name}");
                 if let Err(e) = write_and_flush(provider_stream, consume_service_request).await {
-                    error!("send to provider client error: {e:?}");
+                    warn!("Server: send to provider error: {e:?}");
                 }
                 match read_client_response(provider_stream).await {
                     Ok(provider_response) => {
                         if matches!(provider_response, ClientResponse::Unavailable) {
-                            debug!("Server: Provider service unavailable, response to Consumer");
+                            warn!("Server: provider service unavailable, response to consumer");
                             if let Some((mut stream, _)) =
                                 server_state.wait_stream.write().await.remove(&nonce)
                                 && let Err(e) =
                                     write_and_flush(&mut stream, ServerResponse::NoProvider).await
                             {
-                                error!("response to client error: {e:?}");
+                                warn!("Server: response NoProvider to consumer error: {e:?}");
                             }
                         };
                     }
                     Err(e) => {
-                        error!(
-                            "Server: Provider stream read error {e}, response to Consumer, remove provider"
+                        warn!(
+                            "Server: provider stream read error {e}, response NoProvider to consumer and remove provider stream"
                         );
                         digest_stream.remove(&service_digest);
                         if let Some((mut stream, _)) =
@@ -169,27 +172,24 @@ async fn handle_connection(
                             && let Err(e) =
                                 write_and_flush(&mut stream, ServerResponse::NoProvider).await
                         {
-                            error!("response to client error: {e:?}");
+                            warn!("Server: response NoProvider to client error: {e:?}");
                         }
                     }
                 }
             } else if let Err(e) = write_and_flush(&mut stream, ServerResponse::NoProvider).await {
-                error!("response to client error: {e:?}");
+                warn!("Server: response NoProvider to client error: {e:?}");
             }
         }
         ClientRequest::ServiceInstance(nonce) => {
-            debug!(
-                "Server: Receive new service instance: {}",
-                hex::encode(nonce)
-            );
+            debug!("Server: client provide instance: {}", hex::encode(nonce));
             if let Err(e) = write_and_flush(&mut stream, ServerResponse::Ok).await {
-                error!("response to provider client data stream error: {e:?}");
+                warn!("Server: response Ok to provider data stream error: {e:?}");
             }
             if let Some((mut wait, service_name)) =
                 server_state.wait_stream.write().await.remove(&nonce)
             {
                 if let Err(e) = write_and_flush(&mut wait, ServerResponse::Ok).await {
-                    error!("response to visitor client error: {e:?}");
+                    warn!("Server: response Ok to visitor error: {e:?}");
                 }
                 if let Some(service_config) = server_config.service.get(&service_name) {
                     if let Err(e) = set_tcp_opt(
@@ -198,7 +198,7 @@ async fn handle_connection(
                         server_config.keepalive_secs,
                         server_config.keepalive_interval,
                     ) {
-                        error!("set tcp option error: {e:?}");
+                        warn!("Server: set tcp option for visitor error: {e:?}");
                     }
                     if let Err(e) = set_tcp_opt(
                         stream.get_inner(),
@@ -206,7 +206,7 @@ async fn handle_connection(
                         server_config.keepalive_secs,
                         server_config.keepalive_interval,
                     ) {
-                        error!("set tcp option error: {e:?}");
+                        warn!("Server: set tcp option for provider error: {e:?}");
                     }
                 }
 

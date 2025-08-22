@@ -1,10 +1,9 @@
 use crate::config::{ClientConfig, ServiceConfig, ServiceType};
 use crate::protocol::{
     ClientRequest, ClientResponse, SecureStream, ServerRequest, ServerResponse, client_handshake,
-    read_server_request, read_server_response, udp_copy_consumer, udp_copy_provider,
+    read_server_request, read_server_response, set_tcp_opt, udp_copy_consumer, udp_copy_provider,
     write_and_flush,
 };
-use crate::set_tcp_opt;
 use anyhow::{Result, anyhow, bail};
 use futures_util::future::join_all;
 use std::collections::HashMap;
@@ -42,6 +41,7 @@ impl Client {
     }
 
     pub async fn run(&mut self, mut stop_rx: broadcast::Receiver<()>) -> Result<()> {
+        info!("Client starting...");
         let mut tasks = vec![];
         for (service_name, service_config) in &self.config.service {
             if service_config.address.is_some() || service_config.bind_address.is_some() {
@@ -89,6 +89,8 @@ impl Client {
                 tasks.push(task);
             }
         }
+
+        info!("Client started");
 
         _ = stop_rx.recv().await;
 
@@ -138,14 +140,19 @@ impl Service {
     }
 
     pub async fn run(&mut self) -> Result<()> {
+        info!("Service {} starting...", self.service_name);
         if self.service_config.bind_address.is_none() && self.service_config.address.is_none() {
-            bail!("both of bind_address and address unset")
+            bail!(
+                "Service {}: both of bind_address and address unset",
+                self.service_name
+            )
         }
         let mut tasks = vec![];
         let (service_stop_tx, _) = broadcast::channel::<()>(1);
         let (provider_error_tx, mut provider_error_rx) = mpsc::unbounded_channel::<String>();
         let (udp_error_tx, mut udp_error_rx) = mpsc::unbounded_channel::<String>();
         if self.service_config.address.is_some() {
+            info!("Service {} provider starting...", self.service_name);
             let mut stream = client_handshake(
                 self.server_socket_addr,
                 &self.client_config.server_address,
@@ -158,7 +165,6 @@ impl Service {
                 self.client_config.keepalive_interval,
             )
             .await?;
-            debug!("Provider: Providing service {}", self.service_name);
             write_and_flush(
                 &mut stream,
                 ClientRequest::provide_service(&self.service_name),
@@ -172,34 +178,45 @@ impl Service {
                     let service_stop_rx = service_stop_tx.subscribe();
                     let service_name = self.service_name.clone();
                     let task = tokio::spawn(async move {
-                        debug!("Provider: Waiting server request");
                         if let Err(e) = handle_server_request(
                             stream,
                             service_config,
                             client_config,
                             server_socket_addr,
                             service_stop_rx,
-                            service_name,
+                            service_name.clone(),
                         )
                         .await
                         {
-                            error!("Provider: handle server request error: {e}");
+                            warn!(
+                                "Service {service_name} provider: handle server request error: {e}"
+                            );
                             if let Err(e) = provider_error_tx.send(e.to_string()) {
-                                error!("send provider error signal error: {e}");
+                                warn!(
+                                    "Service {service_name} provider: send provider error signal error: {e}"
+                                );
                             }
                         }
                     });
                     tasks.push(task);
                 }
                 ServerResponse::UnknownService => {
-                    bail!("server response unknown service: {}", self.service_name)
+                    bail!(
+                        "Service {} provider: server response unknown service",
+                        self.service_name
+                    )
                 }
                 ServerResponse::NoProvider => {
-                    bail!("unexpected server response")
+                    bail!(
+                        "Service {} provider: server response no provider, why?",
+                        self.service_name
+                    )
                 }
             }
+            info!("Service {} provider started", self.service_name);
         }
         if let Some(bind_address) = &self.service_config.bind_address {
+            info!("Service {} consumer starting...", self.service_name);
             let service_config = self.service_config.clone();
             let client_config = self.client_config.clone();
             let service_name = self.service_name.clone();
@@ -209,7 +226,7 @@ impl Service {
                 ServiceType::Tcp => {
                     let listener = TcpListener::bind(bind_address).await?;
                     info!(
-                        "listening on {bind_address}(tcp) for service {}",
+                        "Service {} consumer: listening on {bind_address} (tcp)",
                         self.service_name
                     );
                     let task = tokio::spawn(async move {
@@ -218,24 +235,24 @@ impl Service {
                             accept_result = listener.accept() => {
                                     match accept_result {
                                 Err(e) => {
-                                    warn!("accept error: {e}, sleep 100ms");
+                                    warn!("Service {service_name} consumer: accept error: {e}, sleep 100ms");
                                     time::sleep(Duration::from_millis(100)).await;
                                 }
                                 Ok((conn, addr)) => {
-                                    info!("Incoming visitor connection from {addr}");
+                                    debug!("Service {service_name} consumer: incoming visitor connection from {addr}");
                                     let service_config = service_config.clone();
                                     let client_config = client_config.clone();
                                     let service_name = service_name.clone();
                                     tokio::spawn(async move {
-                                        if let Err(err) = handle_visitor_connection_tcp(conn,service_name,service_config,client_config,server_socket_addr).await {
-                                            error!("Consumer: handle visitor connection error: {err:#}");
+                                        if let Err(e) = handle_visitor_connection_tcp(conn,service_name.clone(),service_config,client_config,server_socket_addr).await {
+                                            warn!("Service {service_name} consumer: handle visitor connection error: {e}");
                                         }
                                     });
                                 }
                             }
                             }
                             _ = service_stop_rx.recv() => {
-                                info!("Service consumer {} shutting down...", service_name);
+                                info!("Service {service_name} consumer shutdown");
                                 break;
                             }
                             }
@@ -246,7 +263,7 @@ impl Service {
                 ServiceType::Udp => {
                     let udp_socket = UdpSocket::bind(bind_address).await?;
                     info!(
-                        "listening on {bind_address}(udp) for service {}",
+                        "Service {} consumer: listening on {bind_address} (udp)",
                         self.service_name
                     );
                     let mut data_stream = match client_handshake(
@@ -261,9 +278,7 @@ impl Service {
                     .await
                     {
                         Ok(mut data_stream) => {
-                            debug!(
-                                "Consumer: Prepare udp 'connection' for service: {service_name}"
-                            );
+                            debug!("Service {service_name} consumer: Prepare udp 'connection'");
                             write_and_flush(
                                 &mut data_stream,
                                 ClientRequest::consume_service(&service_name),
@@ -273,53 +288,59 @@ impl Service {
 
                             match read_server_response(&mut data_stream).await? {
                                 ServerResponse::Ok => Ok(data_stream),
-                                ServerResponse::UnknownService => {
-                                    Err(anyhow!("server response: unknown service"))
-                                }
-                                ServerResponse::NoProvider => {
-                                    Err(anyhow!("server response: no provider"))
-                                }
+                                ServerResponse::UnknownService => Err(anyhow!(
+                                    "Service {service_name} consumer: server response: unknown service"
+                                )),
+                                ServerResponse::NoProvider => Err(anyhow!(
+                                    "Service {service_name} consumer: server response: no provider"
+                                )),
                             }
                         }
                         Err(e) => Err(anyhow!(
-                            "Consumer: prepare udp 'connection' handshake error: {e}"
+                            "Service {service_name} consumer: prepare udp 'connection' handshake error: {e}"
                         )),
                     }?;
-                    debug!("Consumer: udp_copy");
+                    debug!("Service {service_name} consumer: start udp copy");
                     let task = tokio::spawn(async move {
                         if let Err(e) =
                             udp_copy_consumer(&udp_socket, &mut data_stream, service_stop_rx).await
                         {
-                            error!("Consumer: udp copy error: {e:?}");
+                            error!("Service {service_name} consumer: udp copy error: {e:?}");
                             if let Err(e) = udp_error_tx.send(e.to_string()) {
-                                error!("send udp error signal error: {e:?}");
+                                error!(
+                                    "Service {service_name} consumer: send udp error signal error: {e:?}"
+                                );
                             }
                         }
+                        info!("Service {service_name} consumer shutdown");
                     });
                     tasks.push(task);
                 }
             }
+            info!("Service {} consumer started", self.service_name);
         }
+
+        info!("Service {} started", self.service_name);
 
         let result = tokio::select! {
             _ = self.stop_rx.recv() => {
                 info!("Service {} shutting down", self.service_name);
                 if let Err(e) = service_stop_tx.send(()) {
-                    error!("send service stop signal(service receive stop) error: {e}");
+                    warn!("Service {}: send service stop signal(service receive stop) error: {e}", self.service_name);
                 }
                 Ok(())
             },
             e = provider_error_rx.recv() => {
                 info!("Service {} shutting down with provider error {e:?}", self.service_name);
                 if let Err(e) = service_stop_tx.send(()) {
-                    error!("send service stop signal(provider error) error: {e}");
+                    warn!("Service {}: send service stop signal(provider error) error: {e}", self.service_name);
                 }
                 bail!("{e:?}")
             },
             e = udp_error_rx.recv() => {
                 info!("Service {} shutting down with udp error {e:?}", self.service_name);
                 if let Err(e) = service_stop_tx.send(()) {
-                    error!("send service stop signal(udp error) error: {e}");
+                    warn!("Service {}: send service stop signal(udp error) error: {e}", self.service_name);
                 }
                 bail!("{e:?}")
             }
@@ -358,18 +379,18 @@ async fn handle_server_request(
                 match request? {
                     ServerRequest::ConsumeService(nonce) => {
                         debug!(
-                            "Provider: Receive server consume Service: {}",
+                            "Service {service_name} provider: receive instance request: {}",
                             hex::encode(nonce)
                         );
                         match service_config.service_type {
                             ServiceType::Tcp => {
-                                debug!("Provider: Connecting upstream");
+                                debug!("Service {service_name} provider: connecting upstream");
                                 let up_stream = match up_socket_addr {
                                     Some(s) => TcpStream::connect(s).await,
                                     None => TcpStream::connect(&up_address).await,
                                 };
                                 if up_stream.is_err() {
-                                    debug!("Provider: Upstream unavailable");
+                                    warn!("Service {service_name} provider: upstream unavailable");
                                     write_and_flush(&mut stream, ClientResponse::Unavailable).await?;
                                     continue;
                                 }
@@ -380,7 +401,7 @@ async fn handle_server_request(
                                     client_config.keepalive_secs,
                                     client_config.keepalive_interval,
                                 ) {
-                                    warn!("set tcp option error: {e:?}");
+                                    warn!("Service {service_name} provider: set tcp option for upstream error: {e:?}");
                                 }
 
                                 match client_handshake(
@@ -394,22 +415,22 @@ async fn handle_server_request(
                                 )
                                 .await {
                                     Ok(mut data_stream) => {
-                                        debug!("Provider: Provide new service instance");
+                                        debug!("Service {service_name} provider: provide instance");
                                         write_and_flush(&mut data_stream, ClientRequest::service_instance(nonce)).await?;
                                         if !matches!(
                                             read_server_response(&mut data_stream).await?,
                                             ServerResponse::Ok
                                         ) {
-                                            bail!("unexpected server response")
+                                            bail!("Service {service_name} provider: unexpected server response")
                                         }
                                         write_and_flush(&mut stream, ClientResponse::Ok).await?;
-                                        debug!("Provider: copy_bidirectional");
+                                        debug!("Service {service_name} provider: start copy bidirectional");
                                         tokio::spawn(
                                             async move { copy_bidirectional(&mut data_stream, &mut up_stream).await },
                                         );
                                     }
                                     Err(e) => {
-                                        bail!("Provider: handle server request handshake error: {e}");
+                                        bail!("Service {service_name} provider: handle server request handshake error: {e}");
                                     }
                                 }
                             }
@@ -430,16 +451,16 @@ async fn handle_server_request(
                                 )
                                 .await {
                                     Ok(mut data_stream) => {
-                                        debug!("Provider: Provide new service udp 'connection'");
+                                        debug!("Service {service_name} provider: provide service udp 'connection'");
                                         write_and_flush(&mut data_stream, ClientRequest::service_instance(nonce)).await?;
                                         if !matches!(
                                             read_server_response(&mut data_stream).await?,
                                             ServerResponse::Ok
                                         ) {
-                                            bail!("unexpected server response")
+                                            bail!("Service {service_name} provider: unexpected server response")
                                         }
                                         write_and_flush(&mut stream, ClientResponse::Ok).await?;
-                                        debug!("Provider: udp_copy");
+                                        debug!("Service {service_name} provider: start udp copy");
                                         tokio::spawn(
                                             async move {
                                                 udp_copy_provider(&udp_socket, &mut data_stream).await
@@ -447,7 +468,7 @@ async fn handle_server_request(
                                         );
                                     }
                                     Err(e) => {
-                                        bail!("Provider: handle server request handshake error: {e}");
+                                        bail!("Service {service_name} provider: handle server request handshake error: {e}");
                                     }
                                 }
                             }
@@ -456,7 +477,7 @@ async fn handle_server_request(
                 }
             },
             _ = service_stop_rx.recv() => {
-                info!("Service provider {service_name} shutting down...");
+                info!("Service provider {service_name} shutdown");
                 break;
             }
         }
@@ -497,7 +518,7 @@ async fn handle_visitor_connection_tcp(
     .await
     {
         Ok(mut data_stream) => {
-            debug!("Consumer: Consuming service: {service_name}");
+            debug!("Service {service_name} consumer: consuming service");
             write_and_flush(
                 &mut data_stream,
                 ClientRequest::consume_service(&service_name),
@@ -506,19 +527,21 @@ async fn handle_visitor_connection_tcp(
 
             match read_server_response(&mut data_stream).await? {
                 ServerResponse::Ok => {
-                    debug!("Consumer: copy_bidirectional");
+                    debug!("Service {service_name} consumer: start copy bidirectional");
                     _ = copy_bidirectional(&mut data_stream, &mut visitor_stream).await;
                 }
                 ServerResponse::UnknownService => {
-                    error!("server response: unknown service");
+                    warn!("Service {service_name} consumer: server response: unknown service");
                 }
                 ServerResponse::NoProvider => {
-                    error!("server response: no provider");
+                    warn!("Service {service_name} consumer: server response: no provider");
                 }
             }
         }
         Err(e) => {
-            error!("Consumer: handle visitor connection handshake error: {e}");
+            error!(
+                "Service {service_name} consumer: handle visitor connection handshake error: {e}"
+            );
         }
     }
     Ok(())

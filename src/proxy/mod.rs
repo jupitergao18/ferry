@@ -2,8 +2,8 @@ use anyhow::{Result, anyhow};
 use tokio::net::TcpStream;
 use url::Url;
 
-pub mod http;
-pub mod socks5;
+mod http;
+mod socks5;
 
 #[derive(Debug, Eq, PartialEq, Clone, Hash)]
 pub struct Auth {

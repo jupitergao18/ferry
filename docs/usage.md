@@ -14,8 +14,8 @@
 ## Hot Reload
 
 ## Todo
-### log 
 ### config hot reload
-### Windows service
 ### web admin
+### Windows service
 ### android/ios client
+### log 

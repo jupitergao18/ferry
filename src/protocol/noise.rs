@@ -1,8 +1,7 @@
-use crate::hash;
 use anyhow::Result;
 use futures_util::ready;
 use pin_project::pin_project;
-use snow::{Builder, HandshakeState, TransportState};
+use snow::{HandshakeState, TransportState};
 use std::{
     fmt::Debug,
     io::ErrorKind,
@@ -307,40 +306,4 @@ where
             }
         }
     }
-}
-
-const NOISE_PATTERN: &str = "Noise_XXpsk0_25519_ChaChaPoly_BLAKE2s";
-
-fn build_responder(psk: &str) -> Result<HandshakeState> {
-    let builder = Builder::new(NOISE_PATTERN.parse()?);
-    let keypair = builder.generate_keypair()?;
-    let psk_hash = hash(psk);
-    Ok(builder
-        .local_private_key(&keypair.private)?
-        .psk(0, &psk_hash)?
-        .build_responder()?)
-}
-
-fn build_initiator(psk: &str) -> Result<HandshakeState> {
-    let builder = Builder::new(NOISE_PATTERN.parse()?);
-    let keypair = builder.generate_keypair()?;
-    let psk_hash = hash(psk);
-    Ok(builder
-        .local_private_key(&keypair.private)?
-        .psk(0, &psk_hash)?
-        .build_initiator()?)
-}
-
-pub async fn responder_handshake<T>(stream: T, psk: &str) -> Result<NoiseStream<T>>
-where
-    T: AsyncRead + AsyncWrite + Unpin,
-{
-    NoiseStream::handshake(stream, build_responder(psk)?).await
-}
-
-pub async fn initiator_handshake<T>(stream: T, psk: &str) -> Result<NoiseStream<T>>
-where
-    T: AsyncRead + AsyncWrite + Unpin,
-{
-    NoiseStream::handshake(stream, build_initiator(psk)?).await
 }

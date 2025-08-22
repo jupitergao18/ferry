@@ -1,10 +1,10 @@
-use crate::noise::{NoiseStream, initiator_handshake, responder_handshake};
 use crate::proxy::proxy_stream;
-use crate::{hash, set_tcp_opt};
 use anyhow::{Result, bail};
 use bincode::enc::write::SizeWriter;
 use bincode::{Decode, Encode};
+use noise::NoiseStream;
 use rand::RngCore;
+use snow::Builder;
 use std::net::SocketAddr;
 use std::sync::LazyLock;
 use std::time::Duration;
@@ -12,7 +12,11 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpStream, UdpSocket};
 use tokio::sync::broadcast;
 use tokio::time;
-use tracing::{error, trace, warn};
+use tracing::{error, trace};
+
+mod noise;
+
+const NOISE_PATTERN: &str = "Noise_XXpsk0_25519_ChaChaPoly_BLAKE2s";
 
 pub type Version = u8;
 pub type SecureStream = NoiseStream<TcpStream>;
@@ -107,6 +111,34 @@ pub struct Size {
     pub client_response: usize,
 }
 
+pub async fn responder_handshake(stream: TcpStream, psk: &str) -> Result<SecureStream> {
+    let builder = Builder::new(NOISE_PATTERN.parse()?);
+    let keypair = builder.generate_keypair()?;
+    let psk_hash = hash(psk);
+    NoiseStream::handshake(
+        stream,
+        builder
+            .local_private_key(&keypair.private)?
+            .psk(0, &psk_hash)?
+            .build_responder()?,
+    )
+    .await
+}
+
+pub async fn initiator_handshake(stream: TcpStream, psk: &str) -> Result<SecureStream> {
+    let builder = Builder::new(NOISE_PATTERN.parse()?);
+    let keypair = builder.generate_keypair()?;
+    let psk_hash = hash(psk);
+    NoiseStream::handshake(
+        stream,
+        builder
+            .local_private_key(&keypair.private)?
+            .psk(0, &psk_hash)?
+            .build_initiator()?,
+    )
+    .await
+}
+
 pub async fn server_handshake(
     stream: TcpStream,
     psk: &str,
@@ -122,14 +154,12 @@ pub async fn server_handshake(
     {
         Ok(stream) => match stream {
             Ok(mut stream) => {
-                if let Err(e) = set_tcp_opt(
+                set_tcp_opt(
                     stream.get_inner(),
                     nodelay,
                     keepalive_secs,
                     keepalive_interval,
-                ) {
-                    warn!("set noise option error: {e}")
-                }
+                )?;
                 read_client_version(&mut stream).await?;
                 write_and_flush(&mut stream, ServerResponse::Ok).await?;
                 Ok(stream)
@@ -157,14 +187,12 @@ pub async fn client_handshake(
         TcpStream::connect(server_address).await?
     };
     let mut stream = initiator_handshake(stream, psk).await?;
-    if let Err(e) = set_tcp_opt(
+    set_tcp_opt(
         stream.get_inner(),
         nodelay,
         keepalive_secs,
         keepalive_interval,
-    ) {
-        warn!("set tcp option error: {e:?}");
-    }
+    )?;
     write_and_flush(&mut stream, ClientVersion::version()).await?;
     if !matches!(read_server_response(&mut stream).await?, ServerResponse::Ok) {
         bail!("unexpected server response")
@@ -323,4 +351,26 @@ pub async fn udp_copy_consumer(
             }
         }
     }
+}
+
+pub fn hash(input: &str) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(input);
+    let mut hash = [0u8; 32];
+    hash.copy_from_slice(&digest);
+    hash
+}
+
+pub fn set_tcp_opt(
+    stream: &TcpStream,
+    nodelay: bool,
+    keepalive_secs: u64,
+    keepalive_interval: u64,
+) -> Result<()> {
+    let s = stream;
+    s.set_nodelay(nodelay)?;
+    let keepalive = socket2::TcpKeepalive::new()
+        .with_time(Duration::from_secs(keepalive_secs))
+        .with_interval(Duration::from_secs(keepalive_interval));
+    Ok(socket2::SockRef::from(s).set_tcp_keepalive(&keepalive)?)
 }
