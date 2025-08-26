@@ -6,8 +6,6 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, mpsc};
 use tracing::{error, info, warn};
 
-const DEFAULT_HEARTBEAT_INTERVAL_SECS: u64 = 30;
-const DEFAULT_HEARTBEAT_TIMEOUT_SECS: u64 = 70;
 const DEFAULT_RETRY_INTERVAL_SECS: u64 = 1;
 const DEFAULT_NODELAY: bool = true;
 const DEFAULT_KEEPALIVE_SECS: u64 = 20;
@@ -29,8 +27,6 @@ pub struct ServerConfig {
     pub bind_address: String,
     pub psk: String,
     pub service: HashMap<String, ServiceConfig>,
-    #[serde(default = "default_heartbeat_interval")]
-    pub heartbeat_interval: u64,
     #[serde(default = "default_nodelay")]
     pub nodelay: bool,
     #[serde(default = "default_keepalive_secs")]
@@ -45,8 +41,6 @@ pub struct ClientConfig {
     pub psk: String,
     pub proxy: Option<String>,
     pub service: HashMap<String, ServiceConfig>,
-    #[serde(default = "default_heartbeat_timeout")]
-    pub heartbeat_timeout: u64,
     #[serde(default = "default_client_retry_interval")]
     pub retry_interval: u64,
     #[serde(default = "default_nodelay")]
@@ -78,14 +72,6 @@ pub struct ServiceConfig {
     pub retry_interval: Option<u64>,
     #[serde(default = "default_service_type")]
     pub service_type: ServiceType,
-}
-
-fn default_heartbeat_interval() -> u64 {
-    DEFAULT_HEARTBEAT_INTERVAL_SECS
-}
-
-fn default_heartbeat_timeout() -> u64 {
-    DEFAULT_HEARTBEAT_TIMEOUT_SECS
 }
 
 fn default_client_retry_interval() -> u64 {
