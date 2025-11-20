@@ -4,6 +4,12 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '模拟的版本号（用于测试）'
+        required: false
+        default: 'v1.0.0-test'
 
 env:
   CARGO_NET_GIT_FETCH_WITH_CLI: true
