@@ -4,18 +4,10 @@ on:
   push:
     tags:
       - 'v*'
-  # 可选：允许手动触发
-  workflow_dispatch:
-    inputs:
-      version:
-        description: '模拟的版本号（用于测试）'
-        required: false
-        default: 'v1.0.0-test'
 
 env:
   CARGO_NET_GIT_FETCH_WITH_CLI: true
   CARGO_TERM_COLOR: always
-  RUST_BACKTRACE: 1
 
 jobs:
   build:
@@ -48,12 +40,6 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
       
-    - name: Get version from tag
-      id: get_version
-      run: |
-        echo "VERSION=${{ github.ref_name }}" >> $GITHUB_ENV
-        echo "Using version: ${{ github.ref_name }}"
-        
     - name: Install Rust toolchain
       uses: actions-rust-lang/setup-rust-toolchain@v1
       with:
@@ -77,45 +63,75 @@ jobs:
         rustup target add x86_64-unknown-linux-musl
         sudo apt-get update
         sudo apt-get install -y musl-tools musl-dev
-        
+      
     - name: Build release binary
+      shell: bash
       run: |
-        # 设置版本信息（如果 Cargo.toml 支持）
-        # echo "Building version: ${{ steps.get_version.outputs.version }}"
+        echo "Building version: ${{ github.ref_name }}"
+        echo "Target: ${{ matrix.target }}"
+        
+        # 构建
         cargo build --release --target ${{ matrix.target }}
         
-        # 查找并重命名二进制文件
+        # 查找并复制二进制文件
         if [ "${{ matrix.os }}" = "windows-latest" ]; then
           # Windows: 查找 .exe 文件
           for file in target/${{ matrix.target }}/release/*.exe; do
-            [ -f "$file" ] && cp "$file" "${{ matrix.artifact_name }}" && break
+            if [ -f "$file" ]; then
+              cp "$file" "${{ matrix.artifact_name }}"
+              echo "Copied: $file to ${{ matrix.artifact_name }}"
+              break
+            fi
           done
         else
           # Unix: 查找可执行文件
           for file in target/${{ matrix.target }}/release/*; do
-            [ -f "$file" ] && [ -x "$file" ] && cp "$file" "${{ matrix.artifact_name }}" && break
+            if [ -f "$file" ] && [ -x "$file" ]; then
+              cp "$file" "${{ matrix.artifact_name }}"
+              echo "Copied: $file to ${{ matrix.artifact_name }}"
+              break
+            fi
           done
         fi
         
         # 验证文件存在
-        ls -la "${{ matrix.artifact_name }}" || echo "Binary not found!"
+        if [ -f "${{ matrix.artifact_name }}" ]; then
+          echo "Build successful: ${{ matrix.artifact_name }}"
+          ls -la "${{ matrix.artifact_name }}"
+        else
+          echo "Error: Binary not found!"
+          ls -la "target/${{ matrix.target }}/release/"
+          exit 1
+        fi
         
     - name: Optimize binary size
+      shell: bash
       run: |
         if command -v strip >/dev/null 2>&1 && [ -f "${{ matrix.artifact_name }}" ]; then
-          strip "${{ matrix.artifact_name }}" || true
+          echo "Stripping binary..."
+          strip "${{ matrix.artifact_name }}" || echo "Strip failed, continuing..."
+        else
+          echo "Strip not available or binary not found, skipping..."
         fi
         
     - name: Set executable permissions
       if: matrix.os != 'windows-latest'
-      run: chmod +x "${{ matrix.artifact_name }}"
+      shell: bash
+      run: |
+        chmod +x "${{ matrix.artifact_name }}"
+        echo "Set executable permissions for ${{ matrix.artifact_name }}"
       
     - name: Calculate SHA256 checksum
+      shell: bash
       run: |
-        if command -v sha256sum >/dev/null 2>&1; then
-          sha256sum "${{ matrix.artifact_name }}" > "${{ matrix.artifact_name }}.sha256"
-        elif command -v shasum >/dev/null 2>&1; then
-          shasum -a 256 "${{ matrix.artifact_name }}" > "${{ matrix.artifact_name }}.sha256"
+        if [ -f "${{ matrix.artifact_name }}" ]; then
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "${{ matrix.artifact_name }}" > "${{ matrix.artifact_name }}.sha256"
+          elif command -v shasum >/dev/null 2>&1; then
+            shasum -a 256 "${{ matrix.artifact_name }}" > "${{ matrix.artifact_name }}.sha256"
+          else
+            echo "SHA256 calculation not available"
+          fi
         fi
         
     - name: Upload artifacts
@@ -141,36 +157,19 @@ jobs:
       uses: actions/download-artifact@v4
       
     - name: Prepare release assets
+      shell: bash
       run: |
         # 创建版本说明
-        cat > release_notes.md << EOF
+        cat > release_notes.md << 'EOF'
         # Release ${{ github.ref_name }}
         
         **Build Date:** $(date -u)
         
         ## Downloads
         
-        - **Windows:** [ferry-windows-x86_64.exe](ferry-windows-x86_64.exe)
+        - **Windows x86_64:** [ferry-windows-x86_64.exe](ferry-windows-x86_64.exe)
         - **macOS Intel:** [ferry-macos-x86_64](ferry-macos-x86_64)
         - **macOS Apple Silicon:** [ferry-macos-aarch64](ferry-macos-aarch64)
-        - **Linux:** [ferry-linux-x86_64](ferry-linux-x86_64)
+        - **Linux x86_64:** [ferry-linux-x86_64](ferry-linux-x86_64)
         
         ## SHA256 Checksums
-        \`\`\`
-        $(find . -name "*.sha256" -exec cat {} \; || echo "No checksums found")
-        \`\`\`
-        EOF
-        
-    - name: Create GitHub Release
-      uses: softprops/action-gh-release@v1
-      with:
-        tag_name: ${{ github.ref_name }}
-        release_name: Release ${{ github.ref_name }}
-        body_path: release_notes.md
-        draft: false
-        prerelease: ${{ contains(github.ref_name, 'rc') || contains(github.ref_name, 'beta') || contains(github.ref_name, 'alpha') }}
-        files: |
-          **/ferry-*
-          !**/artifact/*
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
