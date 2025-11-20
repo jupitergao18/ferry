@@ -179,3 +179,21 @@ jobs:
         - **Linux x86_64:** [ferry-linux-x86_64](ferry-linux-x86_64)
         
         ## SHA256 Checksums
+        # 添加校验和
+        \`\`\`
+        $(find . -name "*.sha256" -exec cat {} \; || echo "No checksums found")
+        \`\`\`
+        EOF
+
+    - name: Create GitHub Release
+      uses: softprops/action-gh-release@v1
+      with:
+        tag_name: ${{ github.ref_name }}
+        release_name: Release ${{ github.ref_name }}
+        body_path: release_notes.md
+        draft: false
+        prerelease: ${{ contains(github.ref_name, 'rc') || contains(github.ref_name, 'beta') || contains(github.ref_name, 'alpha') }}
+        files: |
+          ferry-*
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
