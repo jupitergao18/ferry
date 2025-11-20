@@ -11,6 +11,9 @@ on:
         required: false
         default: 'v1.0.0-test'
 
+permissions:
+  contents: write
+
 env:
   CARGO_NET_GIT_FETCH_WITH_CLI: true
   CARGO_TERM_COLOR: always
@@ -189,11 +192,11 @@ jobs:
       uses: softprops/action-gh-release@v1
       with:
         tag_name: ${{ github.ref_name }}
-        release_name: Release ${{ github.ref_name }}
+        name: Release ${{ github.ref_name }}
         body_path: release_notes.md
         draft: false
         prerelease: ${{ contains(github.ref_name, 'rc') || contains(github.ref_name, 'beta') || contains(github.ref_name, 'alpha') }}
         files: |
-          ferry-*
+          **/ferry-*
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
