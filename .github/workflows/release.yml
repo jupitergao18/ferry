@@ -56,7 +56,7 @@ jobs:
         echo "Building version: ${VERSION}"
         
     - name: Install Rust toolchain
-      uses: actions-rust-lang/setup-rust-toolbox@v1
+      uses: actions-rust-lang/setup-rust-toolchain@v1
       with:
         toolchain: stable
         targets: ${{ matrix.target }}
