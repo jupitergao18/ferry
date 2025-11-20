@@ -51,9 +51,8 @@ jobs:
     - name: Get version from tag
       id: get_version
       run: |
-        VERSION="${GITHUB_REF#refs/tags/}"
-        echo "version=${VERSION}" >> $GITHUB_OUTPUT
-        echo "Building version: ${VERSION}"
+        echo "VERSION=${{ github.ref_name }}" >> $GITHUB_ENV
+        echo "Using version: ${{ github.ref_name }}"
         
     - name: Install Rust toolchain
       uses: actions-rust-lang/setup-rust-toolchain@v1
