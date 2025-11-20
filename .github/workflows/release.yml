@@ -1,0 +1,177 @@
+name: Build and Release Rust Application
+
+on:
+  push:
+    tags:
+      - 'v*'
+  # 可选：允许手动触发
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '模拟的版本号（用于测试）'
+        required: false
+        default: 'v1.0.0-test'
+
+env:
+  CARGO_NET_GIT_FETCH_WITH_CLI: true
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  build:
+    name: Build for ${{ matrix.os }} (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact_name: ferry-windows-x86_64.exe
+            asset_name: ferry-windows-x86_64.exe
+            
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            artifact_name: ferry-macos-x86_64
+            asset_name: ferry-macos-x86_64
+            
+          - os: macos-15
+            target: aarch64-apple-darwin
+            artifact_name: ferry-macos-aarch64
+            asset_name: ferry-macos-aarch64
+            
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            artifact_name: ferry-linux-x86_64
+            asset_name: ferry-linux-x86_64
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Get version from tag
+      id: get_version
+      run: |
+        VERSION="${GITHUB_REF#refs/tags/}"
+        echo "version=${VERSION}" >> $GITHUB_OUTPUT
+        echo "Building version: ${VERSION}"
+        
+    - name: Install Rust toolchain
+      uses: actions-rust-lang/setup-rust-toolbox@v1
+      with:
+        toolchain: stable
+        targets: ${{ matrix.target }}
+        
+    - name: Cache dependencies
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          target
+        key: ${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-${{ matrix.target }}-
+          
+    - name: Setup musl (Linux only)
+      if: matrix.os == 'ubuntu-latest'
+      run: |
+        rustup target add x86_64-unknown-linux-musl
+        sudo apt-get update
+        sudo apt-get install -y musl-tools musl-dev
+        
+    - name: Build release binary
+      run: |
+        # 设置版本信息（如果 Cargo.toml 支持）
+        # echo "Building version: ${{ steps.get_version.outputs.version }}"
+        cargo build --release --target ${{ matrix.target }}
+        
+        # 查找并重命名二进制文件
+        if [ "${{ matrix.os }}" = "windows-latest" ]; then
+          # Windows: 查找 .exe 文件
+          for file in target/${{ matrix.target }}/release/*.exe; do
+            [ -f "$file" ] && cp "$file" "${{ matrix.artifact_name }}" && break
+          done
+        else
+          # Unix: 查找可执行文件
+          for file in target/${{ matrix.target }}/release/*; do
+            [ -f "$file" ] && [ -x "$file" ] && cp "$file" "${{ matrix.artifact_name }}" && break
+          done
+        fi
+        
+        # 验证文件存在
+        ls -la "${{ matrix.artifact_name }}" || echo "Binary not found!"
+        
+    - name: Optimize binary size
+      run: |
+        if command -v strip >/dev/null 2>&1 && [ -f "${{ matrix.artifact_name }}" ]; then
+          strip "${{ matrix.artifact_name }}" || true
+        fi
+        
+    - name: Set executable permissions
+      if: matrix.os != 'windows-latest'
+      run: chmod +x "${{ matrix.artifact_name }}"
+      
+    - name: Calculate SHA256 checksum
+      run: |
+        if command -v sha256sum >/dev/null 2>&1; then
+          sha256sum "${{ matrix.artifact_name }}" > "${{ matrix.artifact_name }}.sha256"
+        elif command -v shasum >/dev/null 2>&1; then
+          shasum -a 256 "${{ matrix.artifact_name }}" > "${{ matrix.artifact_name }}.sha256"
+        fi
+        
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ matrix.artifact_name }}
+        path: |
+          ${{ matrix.artifact_name }}
+          ${{ matrix.artifact_name }}.sha256
+        retention-days: 1
+
+  create-release:
+    name: Create GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Download all artifacts
+      uses: actions/download-artifact@v4
+      
+    - name: Prepare release assets
+      run: |
+        # 创建版本说明
+        cat > release_notes.md << EOF
+        # Release ${{ github.ref_name }}
+        
+        **Build Date:** $(date -u)
+        
+        ## Downloads
+        
+        - **Windows:** [ferry-windows-x86_64.exe](ferry-windows-x86_64.exe)
+        - **macOS Intel:** [ferry-macos-x86_64](ferry-macos-x86_64)
+        - **macOS Apple Silicon:** [ferry-macos-aarch64](ferry-macos-aarch64)
+        - **Linux:** [ferry-linux-x86_64](ferry-linux-x86_64)
+        
+        ## SHA256 Checksums
+        \`\`\`
+        $(find . -name "*.sha256" -exec cat {} \; || echo "No checksums found")
+        \`\`\`
+        EOF
+        
+    - name: Create GitHub Release
+      uses: softprops/action-gh-release@v1
+      with:
+        tag_name: ${{ github.ref_name }}
+        release_name: Release ${{ github.ref_name }}
+        body_path: release_notes.md
+        draft: false
+        prerelease: ${{ contains(github.ref_name, 'rc') || contains(github.ref_name, 'beta') || contains(github.ref_name, 'alpha') }}
+        files: |
+          **/ferry-*
+          !**/artifact/*
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
