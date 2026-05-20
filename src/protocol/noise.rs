@@ -307,3 +307,41 @@ where
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_constants() {
+        assert_eq!(TAG_LEN, 16);
+        assert_eq!(MAX_MESSAGE_LEN, u16::MAX as usize);
+        assert_eq!(LENGTH_FIELD_LEN, 2);
+    }
+
+    #[test]
+    fn test_read_state_debug() {
+        let states = [
+            ReadState::ShuttingDown,
+            ReadState::Idle,
+            ReadState::ReadingLen(0, [0; 2]),
+            ReadState::ReadingMessage(0),
+            ReadState::ServingPayload(0),
+        ];
+        for s in states {
+            let _ = format!("{:?}", s);
+        }
+    }
+
+    #[test]
+    fn test_write_state_debug() {
+        let states = [
+            WriteState::ShuttingDown,
+            WriteState::Idle,
+            WriteState::WritingMessage(0, 0),
+        ];
+        for s in states {
+            let _ = format!("{:?}", s);
+        }
+    }
+}

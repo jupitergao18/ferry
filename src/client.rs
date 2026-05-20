@@ -122,7 +122,77 @@ impl Client {
 
         info!("Client shutdown");
 
-        Ok(())
+    Ok(())
+}
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_service_from_config() {
+        let service_config = ServiceConfig {
+            bind_address: Some("127.0.0.1:18080".to_string()),
+            address: Some("127.0.0.1:8080".to_string()),
+            nodelay: Some(false),
+            retry_interval: Some(3),
+            service_type: crate::config::ServiceType::Tcp,
+        };
+        let client_config = ClientConfig {
+            server_address: "127.0.0.1:17000".to_string(),
+            psk: "test".to_string(),
+            proxy: None,
+            service: std::collections::HashMap::new(),
+            retry_interval: 1,
+            nodelay: true,
+            keepalive_secs: 20,
+            keepalive_interval: 8,
+        };
+        let (_tx, rx) = mpsc::channel(1);
+        let service = Service::from_config(
+            "my_service".to_string(),
+            service_config,
+            client_config,
+            Some("127.0.0.1:17000".parse().unwrap()),
+            rx,
+            15,
+        )
+        .unwrap();
+        assert_eq!(service.get_service_name(), "my_service");
+        assert_eq!(service.get_timeout(), 15);
+    }
+
+    #[test]
+    fn test_service_from_config_no_address() {
+        let service_config = ServiceConfig {
+            bind_address: None,
+            address: None,
+            nodelay: None,
+            retry_interval: None,
+            service_type: crate::config::ServiceType::Tcp,
+        };
+        let client_config = ClientConfig {
+            server_address: "127.0.0.1:17000".to_string(),
+            psk: "test".to_string(),
+            proxy: None,
+            service: std::collections::HashMap::new(),
+            retry_interval: 1,
+            nodelay: true,
+            keepalive_secs: 20,
+            keepalive_interval: 8,
+        };
+        let (_tx, rx) = mpsc::channel(1);
+        let service = Service::from_config(
+            "svc".to_string(),
+            service_config,
+            client_config,
+            None,
+            rx,
+            10,
+        )
+        .unwrap();
+        assert_eq!(service.get_service_name(), "svc");
     }
 }
 
@@ -152,6 +222,16 @@ impl Service {
             stop_rx,
             timeout,
         })
+    }
+
+    #[cfg(test)]
+    pub fn get_service_name(&self) -> &str {
+        &self.service_name
+    }
+
+    #[cfg(test)]
+    pub fn get_timeout(&self) -> u64 {
+        self.timeout
     }
 
     pub async fn run(&mut self) -> Result<()> {

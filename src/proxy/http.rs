@@ -92,3 +92,39 @@ where
         None => Err(Error::NoHttpCode),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_error_display_io() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "not found");
+        let err = Error::Io(io_err);
+        assert!(err.to_string().contains("IO Error"));
+    }
+
+    #[test]
+    fn test_error_display_http_code_not_200() {
+        let err = Error::HttpCodeNot200(403);
+        assert!(err.to_string().contains("403"));
+    }
+
+    #[test]
+    fn test_error_display_eof() {
+        let err = Error::EndOfFile;
+        assert!(err.to_string().contains("end of file"));
+    }
+
+    #[test]
+    fn test_error_display_no_http_code() {
+        let err = Error::NoHttpCode;
+        assert!(err.to_string().contains("No HTTP code"));
+    }
+
+    #[test]
+    fn test_error_display_maximum_length_exceeded() {
+        let err = Error::MaximumResponseHeaderLengthExceeded("foo".to_string());
+        assert!(err.to_string().contains("maximum response header length"));
+    }
+}

@@ -29,7 +29,7 @@ const HANDSHAKE_TIMEOUT: u64 = 5;
 
 const UDP_MTU: usize = 2048;
 
-#[derive(Encode, Decode)]
+#[derive(Encode, Decode, Clone)]
 pub enum ClientVersion {
     Version(Version),
 }
@@ -40,7 +40,7 @@ impl ClientVersion {
     }
 }
 
-#[derive(Encode, Decode)]
+#[derive(Encode, Decode, Clone)]
 pub enum ClientRequest {
     ProvideService(ServiceDigest),
     ConsumeService(ServiceDigest),
@@ -61,14 +61,14 @@ impl ClientRequest {
     }
 }
 
-#[derive(Encode, Decode)]
+#[derive(Encode, Decode, Clone)]
 pub enum ServerResponse {
     Ok,
     UnknownService,
     NoProvider,
 }
 
-#[derive(Encode, Decode)]
+#[derive(Encode, Decode, Clone)]
 pub enum ServerRequest {
     ConsumeService(NonceDigest),
 }
@@ -81,7 +81,7 @@ impl ServerRequest {
     }
 }
 
-#[derive(Encode, Decode)]
+#[derive(Encode, Decode, Clone)]
 pub enum ClientResponse {
     Ok,
     Unavailable,
@@ -383,4 +383,170 @@ pub fn set_tcp_opt(
         .with_time(Duration::from_secs(keepalive_secs))
         .with_interval(Duration::from_secs(keepalive_interval));
     Ok(socket2::SockRef::from(s).set_tcp_keepalive(&keepalive)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_hash_consistency() {
+        let h1 = hash("test_service");
+        let h2 = hash("test_service");
+        let h3 = hash("other_service");
+        assert_eq!(h1, h2);
+        assert_ne!(h1, h3);
+        assert_eq!(h1.len(), 32);
+    }
+
+    #[test]
+    fn test_hash_empty() {
+        let h = hash("");
+        assert_eq!(h.len(), 32);
+        // SHA-256 of empty string is known
+        let expected = hex::decode("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855").unwrap();
+        assert_eq!(&h[..], &expected[..]);
+    }
+
+    #[test]
+    fn test_client_request_provide_service() {
+        let req = ClientRequest::provide_service("my_service");
+        match req {
+            ClientRequest::ProvideService(digest) => {
+                assert_eq!(digest, hash("my_service"));
+            }
+            _ => panic!("expected ProvideService"),
+        }
+    }
+
+    #[test]
+    fn test_client_request_consume_service() {
+        let req = ClientRequest::consume_service("another");
+        match req {
+            ClientRequest::ConsumeService(digest) => {
+                assert_eq!(digest, hash("another"));
+            }
+            _ => panic!("expected ConsumeService"),
+        }
+    }
+
+    #[test]
+    fn test_client_request_service_instance() {
+        let nonce = [1u8; 32];
+        let req = ClientRequest::service_instance(nonce);
+        match req {
+            ClientRequest::ServiceInstance(n) => assert_eq!(n, nonce),
+            _ => panic!("expected ServiceInstance"),
+        }
+    }
+
+    #[test]
+    fn test_server_request_consume_service() {
+        let req = ServerRequest::consume_service();
+        match req {
+            ServerRequest::ConsumeService(nonce) => {
+                assert_eq!(nonce.len(), 32);
+                // Nonce should not be all zeros with high probability
+                assert!(nonce.iter().any(|&b| b != 0));
+            }
+        }
+    }
+
+    #[test]
+    fn test_server_request_consume_service_unique() {
+        let req1 = ServerRequest::consume_service();
+        let req2 = ServerRequest::consume_service();
+        match (&req1, &req2) {
+            (ServerRequest::ConsumeService(n1), ServerRequest::ConsumeService(n2)) => {
+                assert_ne!(n1, n2);
+            }
+        }
+    }
+
+    #[test]
+    fn test_size_lazy_lock() {
+        // Just ensure it doesn't panic and has reasonable sizes
+        assert!(SIZE.client_version > 0);
+        assert!(SIZE.client_request > 0);
+        assert!(SIZE.server_response > 0);
+        assert!(SIZE.server_request > 0);
+        assert!(SIZE.client_response > 0);
+    }
+
+    #[test]
+    fn test_client_version() {
+        let ver = ClientVersion::version();
+        match ver {
+            ClientVersion::Version(v) => assert_eq!(v, VERSION),
+        }
+    }
+
+    #[test]
+    fn test_version_constant() {
+        assert_eq!(VERSION, 1);
+    }
+
+    #[test]
+    fn test_encode_decode_client_request() {
+        let original = ClientRequest::provide_service("test");
+        let encoded = encode(original);
+        let decoded: ClientRequest = decode(&encoded).unwrap();
+        match decoded {
+            ClientRequest::ProvideService(digest) => {
+                assert_eq!(digest, hash("test"));
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn test_encode_decode_server_response() {
+        for resp in [ServerResponse::Ok, ServerResponse::UnknownService, ServerResponse::NoProvider] {
+            let encoded = encode(&resp);
+            let decoded: ServerResponse = decode(&encoded).unwrap();
+            match (&resp, &decoded) {
+                (ServerResponse::Ok, ServerResponse::Ok) => {}
+                (ServerResponse::UnknownService, ServerResponse::UnknownService) => {}
+                (ServerResponse::NoProvider, ServerResponse::NoProvider) => {}
+                _ => panic!("mismatch"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_encode_decode_client_response() {
+        for resp in [ClientResponse::Ok, ClientResponse::Unavailable] {
+            let encoded = encode(&resp);
+            let decoded: ClientResponse = decode(&encoded).unwrap();
+            assert_eq!(std::mem::discriminant(&resp), std::mem::discriminant(&decoded));
+        }
+    }
+
+    #[test]
+    fn test_encode_decode_udp_header() {
+        let header = UdpHeader {
+            from: "127.0.0.1:1234".parse().unwrap(),
+            len: 100,
+        };
+        let encoded = encode(&header);
+        let decoded: UdpHeader = decode(&encoded).unwrap();
+        assert_eq!(decoded.from, header.from);
+        assert_eq!(decoded.len, header.len);
+    }
+
+    #[test]
+    fn test_sizeof_accuracy() {
+        // sizeof should match actual encoded length
+        let cv = ClientVersion::version();
+        let cr = ClientRequest::provide_service("svc");
+        let sr = ServerResponse::Ok;
+        let sq = ServerRequest::consume_service();
+        let cc = ClientResponse::Ok;
+
+        assert_eq!(sizeof(cv.clone()), encode(cv).len());
+        assert_eq!(sizeof(cr.clone()), encode(cr).len());
+        assert_eq!(sizeof(sr.clone()), encode(sr).len());
+        assert_eq!(sizeof(sq.clone()), encode(sq).len());
+        assert_eq!(sizeof(cc.clone()), encode(cc).len());
+    }
 }

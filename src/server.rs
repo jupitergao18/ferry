@@ -89,6 +89,55 @@ impl Server {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_server_from_config() {
+        let mut services = std::collections::HashMap::new();
+        services.insert("test_svc".to_string(), crate::config::ServiceConfig {
+            bind_address: None,
+            address: Some("127.0.0.1:8080".to_string()),
+            nodelay: None,
+            retry_interval: None,
+            service_type: crate::config::ServiceType::Tcp,
+        });
+        let config = ServerConfig {
+            bind_address: "0.0.0.0:17000".to_string(),
+            psk: "test_psk".to_string(),
+            service: services,
+            nodelay: true,
+            keepalive_secs: 20,
+            keepalive_interval: 8,
+        };
+        let server = Server::from_config(config).unwrap();
+        let digest_service = tokio::runtime::Runtime::new().unwrap().block_on(async {
+            server.state.digest_service.read().await.clone()
+        });
+        assert_eq!(digest_service.len(), 1);
+        let service_name = digest_service.get(&hash("test_svc"));
+        assert_eq!(service_name, Some(&"test_svc".to_string()));
+    }
+
+    #[test]
+    fn test_server_from_config_empty_service() {
+        let config = ServerConfig {
+            bind_address: "0.0.0.0:17000".to_string(),
+            psk: "test_psk".to_string(),
+            service: std::collections::HashMap::new(),
+            nodelay: true,
+            keepalive_secs: 20,
+            keepalive_interval: 8,
+        };
+        let server = Server::from_config(config).unwrap();
+        let digest_service = tokio::runtime::Runtime::new().unwrap().block_on(async {
+            server.state.digest_service.read().await.clone()
+        });
+        assert!(digest_service.is_empty());
+    }
+}
+
 async fn handle_connection(
     mut stream: SecureStream,
     server_state: ServerState,

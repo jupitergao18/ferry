@@ -182,3 +182,178 @@ impl ConfigChangeEvent {
         Self::FullRestart(new.clone())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_default_values() {
+        assert_eq!(default_client_retry_interval(), 1);
+        assert_eq!(default_nodelay(), true);
+        assert_eq!(default_keepalive_secs(), 20);
+        assert_eq!(default_keepalive_interval(), 8);
+        assert_eq!(default_timeout(), 10);
+        assert!(default_clients().is_empty());
+    }
+
+    #[test]
+    fn test_config_deserialize_full() {
+        let json = r#"{
+            "timeout": 30,
+            "server": {
+                "bind_address": "0.0.0.0:17000",
+                "psk": "testkey",
+                "service": {
+                    "svc1": {}
+                },
+                "nodelay": false,
+                "keepalive_secs": 60,
+                "keepalive_interval": 10
+            },
+            "clients": [
+                {
+                    "server_address": "127.0.0.1:17000",
+                    "psk": "clientkey",
+                    "service": {
+                        "svc1": {
+                            "bind_address": "127.0.0.1:18080",
+                            "address": "127.0.0.1:8080"
+                        }
+                    },
+                    "retry_interval": 5,
+                    "nodelay": false,
+                    "keepalive_secs": 60,
+                    "keepalive_interval": 10
+                }
+            ]
+        }"#;
+
+        let config: Config = serde_json::from_str(json).unwrap();
+        assert_eq!(config.timeout, 30);
+        assert!(config.server.is_some());
+        let server = config.server.unwrap();
+        assert_eq!(server.bind_address, "0.0.0.0:17000");
+        assert_eq!(server.psk, "testkey");
+        assert!(!server.nodelay);
+        assert_eq!(server.keepalive_secs, 60);
+        assert_eq!(server.keepalive_interval, 10);
+        assert_eq!(config.clients.len(), 1);
+        let client = &config.clients[0];
+        assert_eq!(client.server_address, "127.0.0.1:17000");
+        assert_eq!(client.retry_interval, 5);
+        assert!(!client.nodelay);
+        assert_eq!(client.keepalive_secs, 60);
+    }
+
+    #[test]
+    fn test_config_deserialize_defaults() {
+        let json = r#"{
+            "server": {
+                "bind_address": "0.0.0.0:17000",
+                "psk": "key",
+                "service": {}
+            }
+        }"#;
+
+        let config: Config = serde_json::from_str(json).unwrap();
+        assert_eq!(config.timeout, 10);
+        let server = config.server.unwrap();
+        assert!(server.nodelay);
+        assert_eq!(server.keepalive_secs, 20);
+        assert_eq!(server.keepalive_interval, 8);
+        assert!(config.clients.is_empty());
+    }
+
+    #[test]
+    fn test_client_config_defaults() {
+        let json = r#"{
+            "server_address": "127.0.0.1:17000",
+            "psk": "key",
+            "service": {}
+        }"#;
+
+        let client: ClientConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(client.retry_interval, 1);
+        assert!(client.nodelay);
+        assert_eq!(client.keepalive_secs, 20);
+        assert_eq!(client.keepalive_interval, 8);
+        assert!(client.proxy.is_none());
+    }
+
+    #[test]
+    fn test_service_config_service_type() {
+        let json_tcp = r#"{ "bind_address": ":8080", "service_type": "tcp" }"#;
+        let svc: ServiceConfig = serde_json::from_str(json_tcp).unwrap();
+        assert!(matches!(svc.service_type, ServiceType::Tcp));
+
+        let json_udp = r#"{ "bind_address": ":8080", "service_type": "udp" }"#;
+        let svc: ServiceConfig = serde_json::from_str(json_udp).unwrap();
+        assert!(matches!(svc.service_type, ServiceType::Udp));
+    }
+
+    #[test]
+    fn test_service_config_default_type() {
+        let json = r#"{ "bind_address": ":8080" }"#;
+        let svc: ServiceConfig = serde_json::from_str(json).unwrap();
+        assert!(matches!(svc.service_type, ServiceType::Tcp));
+    }
+
+    #[test]
+    fn test_config_serialize_roundtrip() {
+        let config = Config {
+            timeout: 42,
+            server: Some(ServerConfig {
+                bind_address: "0.0.0.0:17000".to_string(),
+                psk: "secret".to_string(),
+                service: HashMap::new(),
+                nodelay: true,
+                keepalive_secs: 20,
+                keepalive_interval: 8,
+            }),
+            clients: vec![ClientConfig {
+                server_address: "127.0.0.1:17000".to_string(),
+                psk: "client".to_string(),
+                proxy: None,
+                service: HashMap::new(),
+                retry_interval: 1,
+                nodelay: true,
+                keepalive_secs: 20,
+                keepalive_interval: 8,
+            }],
+        };
+
+        let json = serde_json::to_string(&config).unwrap();
+        let parsed: Config = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.timeout, config.timeout);
+        assert_eq!(parsed.clients.len(), config.clients.len());
+    }
+
+    #[test]
+    fn test_config_from_file() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("ferry_test_config.json");
+        let json = r#"{"timeout": 7, "server": {"bind_address": ":9000", "psk": "k", "service": {}}}"#;
+        std::fs::write(&path, json).unwrap();
+        let config = Config::from_file(path).unwrap();
+        assert_eq!(config.timeout, 7);
+    }
+
+    #[test]
+    fn test_config_change_event_from_configs() {
+        let old = Config {
+            timeout: 10,
+            server: None,
+            clients: vec![],
+        };
+        let new = Config {
+            timeout: 20,
+            server: None,
+            clients: vec![],
+        };
+        let event = ConfigChangeEvent::from_configs(&old, &new);
+        match event {
+            ConfigChangeEvent::FullRestart(cfg) => assert_eq!(cfg.timeout, 20),
+        }
+    }
+}

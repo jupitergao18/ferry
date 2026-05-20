@@ -440,3 +440,240 @@ where
 {
     init(socket, Command::Connect, (host, port), auth).await
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn auth_method_to_u8(method: AuthMethod) -> u8 {
+        match method {
+            AuthMethod::None => 0x00,
+            AuthMethod::GssApi => 0x01,
+            AuthMethod::UsernamePassword => 0x02,
+            AuthMethod::IanaReserved(v) => v,
+            AuthMethod::Private(v) => v,
+        }
+    }
+
+    #[test]
+    fn test_auth_method_none() {
+        assert_eq!(auth_method_to_u8(AuthMethod::None), 0x00);
+    }
+
+    #[test]
+    fn test_auth_method_gssapi() {
+        assert_eq!(auth_method_to_u8(AuthMethod::GssApi), 0x01);
+    }
+
+    #[test]
+    fn test_auth_method_username_password() {
+        assert_eq!(auth_method_to_u8(AuthMethod::UsernamePassword), 0x02);
+    }
+
+    #[test]
+    fn test_auth_method_iana_reserved() {
+        let m = AuthMethod::IanaReserved(0x05);
+        assert_eq!(auth_method_to_u8(m), 0x05);
+    }
+
+    #[test]
+    fn test_auth_method_private() {
+        let m = AuthMethod::Private(0x80);
+        assert_eq!(auth_method_to_u8(m), 0x80);
+    }
+
+    #[test]
+    fn test_command_connect() {
+        assert_eq!(Command::Connect as u8, 0x01);
+    }
+
+    #[test]
+    fn test_atyp_values() {
+        assert_eq!(Atyp::V4 as u8, 0x01);
+        assert_eq!(Atyp::Domain as u8, 0x03);
+        assert_eq!(Atyp::V6 as u8, 0x04);
+    }
+
+    #[test]
+    fn test_unsuccessful_reply_display() {
+        let r = UnsuccessfulReply::GeneralFailure;
+        assert_eq!(format!("{:?}", r), "GeneralFailure");
+    }
+
+    #[test]
+    fn test_addr_kind_from_ipv4() {
+        let addr = AddrKind::from((Ipv4Addr::new(127, 0, 0, 1), 8080u16));
+        match addr {
+            AddrKind::Ip(SocketAddr::V4(a)) => {
+                assert_eq!(a.ip(), &Ipv4Addr::new(127, 0, 0, 1));
+                assert_eq!(a.port(), 8080);
+            }
+            _ => panic!("expected IPv4"),
+        }
+    }
+
+    #[test]
+    fn test_addr_kind_from_ipv6() {
+        let addr = AddrKind::from((Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 1), 9090u16));
+        match addr {
+            AddrKind::Ip(SocketAddr::V6(a)) => {
+                assert_eq!(a.ip(), &Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 1));
+                assert_eq!(a.port(), 9090);
+            }
+            _ => panic!("expected IPv6"),
+        }
+    }
+
+    #[test]
+    fn test_addr_kind_from_ip_addr() {
+        let ip = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1));
+        let addr = AddrKind::from((ip, 443u16));
+        match addr {
+            AddrKind::Ip(SocketAddr::V4(a)) => {
+                assert_eq!(a.ip(), &Ipv4Addr::new(192, 168, 1, 1));
+                assert_eq!(a.port(), 443);
+            }
+            _ => panic!("expected IPv4"),
+        }
+    }
+
+    #[test]
+    fn test_addr_kind_from_socket_addr() {
+        let sa = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 1), 53));
+        let addr = AddrKind::from(sa);
+        match addr {
+            AddrKind::Ip(SocketAddr::V4(a)) => {
+                assert_eq!(a.ip(), &Ipv4Addr::new(10, 0, 0, 1));
+                assert_eq!(a.port(), 53);
+            }
+            _ => panic!("expected IPv4"),
+        }
+    }
+
+    #[test]
+    fn test_addr_kind_from_socket_addr_v4() {
+        let sa = SocketAddrV4::new(Ipv4Addr::new(1, 2, 3, 4), 80);
+        let addr = AddrKind::from(sa);
+        match addr {
+            AddrKind::Ip(SocketAddr::V4(a)) => {
+                assert_eq!(a.ip(), &Ipv4Addr::new(1, 2, 3, 4));
+                assert_eq!(a.port(), 80);
+            }
+            _ => panic!("expected IPv4"),
+        }
+    }
+
+    #[test]
+    fn test_addr_kind_from_socket_addr_v6() {
+        let sa = SocketAddrV6::new(Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 1), 443, 0, 0);
+        let addr = AddrKind::from(sa);
+        match addr {
+            AddrKind::Ip(SocketAddr::V6(a)) => {
+                assert_eq!(a.ip(), &Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 1));
+                assert_eq!(a.port(), 443);
+            }
+            _ => panic!("expected IPv6"),
+        }
+    }
+
+    #[test]
+    fn test_addr_kind_from_str() {
+        let addr = AddrKind::from(("example.com", 443u16));
+        match addr {
+            AddrKind::Domain(d, p) => {
+                assert_eq!(d, "example.com");
+                assert_eq!(p, 443);
+            }
+            _ => panic!("expected Domain"),
+        }
+    }
+
+    #[test]
+    fn test_addr_kind_from_string() {
+        let addr = AddrKind::from(("example.com".to_string(), 443u16));
+        match addr {
+            AddrKind::Domain(d, p) => {
+                assert_eq!(d, "example.com");
+                assert_eq!(p, 443);
+            }
+            _ => panic!("expected Domain"),
+        }
+    }
+
+    #[test]
+    fn test_error_display_invalid_version() {
+        let err = Error::InvalidVersion(0x04);
+        let msg = err.to_string();
+        assert!(msg.contains("Invalid SOCKS version"));
+        assert!(msg.contains("4"));
+    }
+
+    #[test]
+    fn test_error_display_invalid_atyp() {
+        let err = Error::InvalidAtyp(0xFF);
+        let msg = err.to_string();
+        assert!(msg.contains("Invalid address type"));
+        assert!(msg.contains("ff"));
+    }
+
+    #[test]
+    fn test_error_display_invalid_reserved() {
+        let err = Error::InvalidReserved(0x01);
+        let msg = err.to_string();
+        assert!(msg.contains("Invalid reserved bytes"));
+        assert!(msg.contains("1"));
+    }
+
+    #[test]
+    fn test_error_display_invalid_auth_status() {
+        let err = Error::InvalidAuthStatus(0x02);
+        let msg = err.to_string();
+        assert!(msg.contains("Invalid authentication status"));
+        assert!(msg.contains("2"));
+    }
+
+    #[test]
+    fn test_error_display_invalid_auth_subnegotiation() {
+        let err = Error::InvalidAuthSubnegotiation(0x02);
+        let msg = err.to_string();
+        assert!(msg.contains("Invalid authentication version of subnegotiation"));
+        assert!(msg.contains("2"));
+    }
+
+    #[test]
+    fn test_error_display_invalid_auth_method() {
+        let err = Error::InvalidAuthMethod(AuthMethod::GssApi);
+        assert!(err.to_string().contains("GssApi"));
+    }
+
+    #[test]
+    fn test_error_display_wrong_version() {
+        let err = Error::WrongVersion;
+        assert!(err.to_string().contains("version is 4"));
+    }
+
+    #[test]
+    fn test_error_display_no_acceptable_methods() {
+        let err = Error::NoAcceptableMethods;
+        assert!(err.to_string().contains("No acceptable methods"));
+    }
+
+    #[test]
+    fn test_error_display_response() {
+        let err = Error::Response(UnsuccessfulReply::ConnectionRefused);
+        assert!(err.to_string().contains("ConnectionRefused"));
+    }
+
+    #[test]
+    fn test_error_display_too_long_string() {
+        let err = Error::TooLongString(StringKind::Domain);
+        assert!(err.to_string().contains("Domain"));
+    }
+
+    #[test]
+    fn test_string_kind_display() {
+        assert_eq!(format!("{:?}", StringKind::Domain), "Domain");
+        assert_eq!(format!("{:?}", StringKind::Username), "Username");
+        assert_eq!(format!("{:?}", StringKind::Password), "Password");
+    }
+}
