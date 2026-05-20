@@ -25,10 +25,11 @@ pub struct Client {
     server_socket_addr: Option<SocketAddr>,
     config: ClientConfig,
     state: ClientState,
+    timeout: u64,
 }
 
 impl Client {
-    pub async fn from_config(config: ClientConfig) -> Result<Self> {
+    pub async fn from_config(config: ClientConfig, timeout: u64) -> Result<Self> {
         let state = Arc::new(InnerClientState {
             service_stop_tx: RwLock::new(HashMap::new()),
         });
@@ -37,6 +38,7 @@ impl Client {
             server_socket_addr,
             config,
             state,
+            timeout,
         })
     }
 
@@ -55,6 +57,7 @@ impl Client {
                 let config = self.config.clone();
                 let state = self.state.clone();
                 let server_socket_addr = self.server_socket_addr;
+                let timeout = self.timeout;
 
                 let task = tokio::spawn(async move {
                     loop {
@@ -65,6 +68,7 @@ impl Client {
                             config.clone(),
                             server_socket_addr,
                             service_stop_rx,
+                            timeout,
                         ) {
                             Ok(mut service) => {
                                 state
@@ -74,7 +78,15 @@ impl Client {
                                     .insert(service_name.clone(), service_stop_tx);
                                 if let Err(e) = service.run().await {
                                     error!("Service error {e}. Retry in {retry_interval:?}...");
-                                    time::sleep(retry_interval).await;
+                                    let (sleep_stop_tx, mut sleep_stop_rx) = mpsc::channel::<()>(1);
+                                    state.service_stop_tx.write().await.insert(service_name.clone(), sleep_stop_tx);
+                                    tokio::select! {
+                                        _ = time::sleep(retry_interval) => {},
+                                        _ = sleep_stop_rx.recv() => {
+                                            info!("Service {service_name} stopped during retry wait");
+                                            break;
+                                        }
+                                    }
                                 } else {
                                     break;
                                 }
@@ -120,6 +132,7 @@ pub struct Service {
     client_config: ClientConfig,
     server_socket_addr: Option<SocketAddr>,
     stop_rx: mpsc::Receiver<()>,
+    timeout: u64,
 }
 
 impl Service {
@@ -129,6 +142,7 @@ impl Service {
         client_config: ClientConfig,
         server_socket_addr: Option<SocketAddr>,
         stop_rx: mpsc::Receiver<()>,
+        timeout: u64,
     ) -> Result<Self> {
         Ok(Self {
             service_name,
@@ -136,6 +150,7 @@ impl Service {
             client_config,
             server_socket_addr,
             stop_rx,
+            timeout,
         })
     }
 
@@ -163,6 +178,7 @@ impl Service {
                     .unwrap_or(self.client_config.nodelay),
                 self.client_config.keepalive_secs,
                 self.client_config.keepalive_interval,
+                self.timeout,
             )
             .await?;
             write_and_flush(
@@ -177,6 +193,7 @@ impl Service {
                     let server_socket_addr = self.server_socket_addr;
                     let service_stop_rx = service_stop_tx.subscribe();
                     let service_name = self.service_name.clone();
+                    let timeout = self.timeout;
                     let task = tokio::spawn(async move {
                         if let Err(e) = handle_server_request(
                             stream,
@@ -185,6 +202,7 @@ impl Service {
                             server_socket_addr,
                             service_stop_rx,
                             service_name.clone(),
+                            timeout,
                         )
                         .await
                         {
@@ -221,6 +239,7 @@ impl Service {
             let client_config = self.client_config.clone();
             let service_name = self.service_name.clone();
             let server_socket_addr = self.server_socket_addr;
+            let timeout = self.timeout;
             let mut service_stop_rx = service_stop_tx.subscribe();
             match service_config.service_type {
                 ServiceType::Tcp => {
@@ -244,7 +263,7 @@ impl Service {
                                     let client_config = client_config.clone();
                                     let service_name = service_name.clone();
                                     tokio::spawn(async move {
-                                        if let Err(e) = handle_visitor_connection_tcp(conn,service_name.clone(),service_config,client_config,server_socket_addr).await {
+                                        if let Err(e) = handle_visitor_connection_tcp(conn,service_name.clone(),service_config,client_config,server_socket_addr,timeout).await {
                                             warn!("Service {service_name} consumer: handle visitor connection error: {e}");
                                         }
                                     });
@@ -274,6 +293,7 @@ impl Service {
                         service_config.nodelay.unwrap_or(client_config.nodelay),
                         client_config.keepalive_secs,
                         client_config.keepalive_interval,
+                        timeout,
                     )
                     .await
                     {
@@ -367,6 +387,7 @@ async fn handle_server_request(
     server_socket_addr: Option<SocketAddr>,
     mut service_stop_rx: broadcast::Receiver<()>,
     service_name: String,
+    timeout: u64,
 ) -> Result<()> {
     let up_address = service_config.address.clone().unwrap();
     let up_socket_addr = match lookup_host(&up_address).await {
@@ -385,16 +406,28 @@ async fn handle_server_request(
                         match service_config.service_type {
                             ServiceType::Tcp => {
                                 debug!("Service {service_name} provider: connecting upstream");
-                                let up_stream = match up_socket_addr {
-                                    Some(s) => TcpStream::connect(s).await,
-                                    None => TcpStream::connect(&up_address).await,
+                                let up_stream = time::timeout(
+                                    Duration::from_secs(timeout),
+                                    async {
+                                        match up_socket_addr {
+                                            Some(s) => TcpStream::connect(s).await,
+                                            None => TcpStream::connect(&up_address).await,
+                                        }
+                                    }
+                                ).await;
+                                let mut up_stream = match up_stream {
+                                    Ok(Ok(stream)) => stream,
+                                    Ok(Err(e)) => {
+                                        warn!("Service {service_name} provider: upstream connect error: {e}");
+                                        write_and_flush(&mut stream, ClientResponse::Unavailable).await?;
+                                        continue;
+                                    }
+                                    Err(_) => {
+                                        warn!("Service {service_name} provider: upstream connect timeout");
+                                        write_and_flush(&mut stream, ClientResponse::Unavailable).await?;
+                                        continue;
+                                    }
                                 };
-                                if up_stream.is_err() {
-                                    warn!("Service {service_name} provider: upstream unavailable");
-                                    write_and_flush(&mut stream, ClientResponse::Unavailable).await?;
-                                    continue;
-                                }
-                                let mut up_stream = up_stream?;
                                 if let Err(e) = set_tcp_opt(
                                     &up_stream,
                                     service_config.nodelay.unwrap_or(client_config.nodelay),
@@ -404,17 +437,20 @@ async fn handle_server_request(
                                     warn!("Service {service_name} provider: set tcp option for upstream error: {e:?}");
                                 }
 
-                                match client_handshake(
-                                    server_socket_addr,
-                                    &client_config.server_address,
-                                    &client_config.proxy,
-                                    &client_config.psk,
-                                    service_config.nodelay.unwrap_or(client_config.nodelay),
-                                    client_config.keepalive_secs,
-                                    client_config.keepalive_interval,
-                                )
-                                .await {
-                                    Ok(mut data_stream) => {
+                                match time::timeout(
+                                    Duration::from_secs(timeout),
+                                    client_handshake(
+                                        server_socket_addr,
+                                        &client_config.server_address,
+                                        &client_config.proxy,
+                                        &client_config.psk,
+                                        service_config.nodelay.unwrap_or(client_config.nodelay),
+                                        client_config.keepalive_secs,
+                                        client_config.keepalive_interval,
+                                        timeout,
+                                    )
+                                ).await {
+                                    Ok(Ok(mut data_stream)) => {
                                         debug!("Service {service_name} provider: provide instance");
                                         write_and_flush(&mut data_stream, ClientRequest::service_instance(nonce)).await?;
                                         if !matches!(
@@ -429,28 +465,53 @@ async fn handle_server_request(
                                             async move { copy_bidirectional(&mut data_stream, &mut up_stream).await },
                                         );
                                     }
-                                    Err(e) => {
-                                        bail!("Service {service_name} provider: handle server request handshake error: {e}");
+                                    Ok(Err(e)) => {
+                                        warn!("Service {service_name} provider: data stream handshake error: {e}");
+                                        write_and_flush(&mut stream, ClientResponse::Unavailable).await?;
+                                    }
+                                    Err(_) => {
+                                        warn!("Service {service_name} provider: data stream handshake timeout");
+                                        write_and_flush(&mut stream, ClientResponse::Unavailable).await?;
                                     }
                                 }
                             }
                             ServiceType::Udp => {
                                 let udp_socket = UdpSocket::bind("0.0.0.0:0").await?;
-                                match up_socket_addr {
-                                    Some(s) => udp_socket.connect(s).await,
-                                    None => udp_socket.connect(&up_address).await,
-                                }?;
-                                match client_handshake(
-                                    server_socket_addr,
-                                    &client_config.server_address,
-                                    &client_config.proxy,
-                                    &client_config.psk,
-                                    service_config.nodelay.unwrap_or(client_config.nodelay),
-                                    client_config.keepalive_secs,
-                                    client_config.keepalive_interval,
-                                )
-                                .await {
-                                    Ok(mut data_stream) => {
+                                match time::timeout(
+                                    Duration::from_secs(timeout),
+                                    async {
+                                        match up_socket_addr {
+                                            Some(s) => udp_socket.connect(s).await,
+                                            None => udp_socket.connect(&up_address).await,
+                                        }
+                                    }
+                                ).await {
+                                    Ok(Ok(())) => {}
+                                    Ok(Err(e)) => {
+                                        warn!("Service {service_name} provider: upstream udp connect error: {e}");
+                                        write_and_flush(&mut stream, ClientResponse::Unavailable).await?;
+                                        continue;
+                                    }
+                                    Err(_) => {
+                                        warn!("Service {service_name} provider: upstream udp connect timeout");
+                                        write_and_flush(&mut stream, ClientResponse::Unavailable).await?;
+                                        continue;
+                                    }
+                                }
+                                match time::timeout(
+                                    Duration::from_secs(timeout),
+                                    client_handshake(
+                                        server_socket_addr,
+                                        &client_config.server_address,
+                                        &client_config.proxy,
+                                        &client_config.psk,
+                                        service_config.nodelay.unwrap_or(client_config.nodelay),
+                                        client_config.keepalive_secs,
+                                        client_config.keepalive_interval,
+                                        timeout,
+                                    )
+                                ).await {
+                                    Ok(Ok(mut data_stream)) => {
                                         debug!("Service {service_name} provider: provide service udp 'connection'");
                                         write_and_flush(&mut data_stream, ClientRequest::service_instance(nonce)).await?;
                                         if !matches!(
@@ -467,8 +528,13 @@ async fn handle_server_request(
                                             },
                                         );
                                     }
-                                    Err(e) => {
-                                        bail!("Service {service_name} provider: handle server request handshake error: {e}");
+                                    Ok(Err(e)) => {
+                                        warn!("Service {service_name} provider: data stream handshake error: {e}");
+                                        write_and_flush(&mut stream, ClientResponse::Unavailable).await?;
+                                    }
+                                    Err(_) => {
+                                        warn!("Service {service_name} provider: data stream handshake timeout");
+                                        write_and_flush(&mut stream, ClientResponse::Unavailable).await?;
                                     }
                                 }
                             }
@@ -497,6 +563,7 @@ async fn handle_visitor_connection_tcp(
     service_config: ServiceConfig,
     client_config: ClientConfig,
     server_socket_addr: Option<SocketAddr>,
+    timeout: u64,
 ) -> Result<()> {
     if let Err(e) = set_tcp_opt(
         &visitor_stream,
@@ -514,6 +581,7 @@ async fn handle_visitor_connection_tcp(
         service_config.nodelay.unwrap_or(client_config.nodelay),
         client_config.keepalive_secs,
         client_config.keepalive_interval,
+        timeout,
     )
     .await
     {

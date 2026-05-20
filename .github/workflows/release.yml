@@ -27,23 +27,19 @@ jobs:
         include:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            artifact_name: ferry-windows-x86_64.exe
-            asset_name: ferry-windows-x86_64.exe
-            
+            base_name: ferry-windows-x86_64.exe
+          
           - os: macos-15-intel
             target: x86_64-apple-darwin
-            artifact_name: ferry-macos-x86_64
-            asset_name: ferry-macos-x86_64
-            
+            base_name: ferry-macos-x86_64
+          
           - os: macos-15
             target: aarch64-apple-darwin
-            artifact_name: ferry-macos-aarch64
-            asset_name: ferry-macos-aarch64
-            
+            base_name: ferry-macos-aarch64
+          
           - os: ubuntu-latest
             target: x86_64-unknown-linux-musl
-            artifact_name: ferry-linux-x86_64
-            asset_name: ferry-linux-x86_64
+            base_name: ferry-linux-x86_64
 
     steps:
     - name: Checkout code
@@ -78,17 +74,20 @@ jobs:
       run: |
         echo "Building version: ${{ github.ref_name }}"
         echo "Target: ${{ matrix.target }}"
-        
+
+        VERSION="${{ github.ref_name }}"
+        ARTIFACT_NAME="${{ matrix.base_name }}-${VERSION}"
+
         # 构建
         cargo build --release --target ${{ matrix.target }}
-        
+
         # 查找并复制二进制文件
         if [ "${{ matrix.os }}" = "windows-latest" ]; then
           # Windows: 查找 .exe 文件
           for file in target/${{ matrix.target }}/release/*.exe; do
             if [ -f "$file" ]; then
-              cp "$file" "${{ matrix.artifact_name }}"
-              echo "Copied: $file to ${{ matrix.artifact_name }}"
+              cp "$file" "$ARTIFACT_NAME"
+              echo "Copied: $file to $ARTIFACT_NAME"
               break
             fi
           done
@@ -96,17 +95,17 @@ jobs:
           # Unix: 查找可执行文件
           for file in target/${{ matrix.target }}/release/*; do
             if [ -f "$file" ] && [ -x "$file" ]; then
-              cp "$file" "${{ matrix.artifact_name }}"
-              echo "Copied: $file to ${{ matrix.artifact_name }}"
+              cp "$file" "$ARTIFACT_NAME"
+              echo "Copied: $file to $ARTIFACT_NAME"
               break
             fi
           done
         fi
-        
+
         # 验证文件存在
-        if [ -f "${{ matrix.artifact_name }}" ]; then
-          echo "Build successful: ${{ matrix.artifact_name }}"
-          ls -la "${{ matrix.artifact_name }}"
+        if [ -f "$ARTIFACT_NAME" ]; then
+          echo "Build successful: $ARTIFACT_NAME"
+          ls -la "$ARTIFACT_NAME"
         else
           echo "Error: Binary not found!"
           ls -la "target/${{ matrix.target }}/release/"
@@ -116,9 +115,11 @@ jobs:
     - name: Optimize binary size
       shell: bash
       run: |
-        if command -v strip >/dev/null 2>&1 && [ -f "${{ matrix.artifact_name }}" ]; then
+        VERSION="${{ github.ref_name }}"
+        ARTIFACT_NAME="${{ matrix.base_name }}-${VERSION}"
+        if command -v strip >/dev/null 2>&1 && [ -f "$ARTIFACT_NAME" ]; then
           echo "Stripping binary..."
-          strip "${{ matrix.artifact_name }}" || echo "Strip failed, continuing..."
+          strip "$ARTIFACT_NAME" || echo "Strip failed, continuing..."
         else
           echo "Strip not available or binary not found, skipping..."
         fi
@@ -127,17 +128,21 @@ jobs:
       if: matrix.os != 'windows-latest'
       shell: bash
       run: |
-        chmod +x "${{ matrix.artifact_name }}"
-        echo "Set executable permissions for ${{ matrix.artifact_name }}"
+        VERSION="${{ github.ref_name }}"
+        ARTIFACT_NAME="${{ matrix.base_name }}-${VERSION}"
+        chmod +x "$ARTIFACT_NAME"
+        echo "Set executable permissions for $ARTIFACT_NAME"
       
     - name: Calculate SHA256 checksum
       shell: bash
       run: |
-        if [ -f "${{ matrix.artifact_name }}" ]; then
+        VERSION="${{ github.ref_name }}"
+        ARTIFACT_NAME="${{ matrix.base_name }}-${VERSION}"
+        if [ -f "$ARTIFACT_NAME" ]; then
           if command -v sha256sum >/dev/null 2>&1; then
-            sha256sum "${{ matrix.artifact_name }}" > "${{ matrix.artifact_name }}.sha256"
+            sha256sum "$ARTIFACT_NAME" > "$ARTIFACT_NAME.sha256"
           elif command -v shasum >/dev/null 2>&1; then
-            shasum -a 256 "${{ matrix.artifact_name }}" > "${{ matrix.artifact_name }}.sha256"
+            shasum -a 256 "$ARTIFACT_NAME" > "$ARTIFACT_NAME.sha256"
           else
             echo "SHA256 calculation not available"
           fi
@@ -146,10 +151,10 @@ jobs:
     - name: Upload artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: ${{ matrix.artifact_name }}
+        name: ${{ matrix.base_name }}-${{ github.ref_name }}
         path: |
-          ${{ matrix.artifact_name }}
-          ${{ matrix.artifact_name }}.sha256
+          ${{ matrix.base_name }}-${{ github.ref_name }}
+          ${{ matrix.base_name }}-${{ github.ref_name }}.sha256
         retention-days: 1
 
   create-release:
@@ -168,24 +173,23 @@ jobs:
     - name: Prepare release assets
       shell: bash
       run: |
-        # 创建版本说明
-        cat > release_notes.md << 'EOF'
-        # Release ${{ github.ref_name }}
-        
-        **Build Date:** $(date -u)
-        
+        VERSION="${{ github.ref_name }}"
+        cat > release_notes.md << EOF
+        # Release $VERSION
+
+        **Build Date:** $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+
         ## Downloads
-        
-        - **Windows x86_64:** [ferry-windows-x86_64.exe](ferry-windows-x86_64.exe)
-        - **macOS Intel:** [ferry-macos-x86_64](ferry-macos-x86_64)
-        - **macOS Apple Silicon:** [ferry-macos-aarch64](ferry-macos-aarch64)
-        - **Linux x86_64:** [ferry-linux-x86_64](ferry-linux-x86_64)
-        
+
+        - **Windows x86_64:** [ferry-windows-x86_64.exe-$VERSION](ferry-windows-x86_64.exe-$VERSION)
+        - **macOS Intel:** [ferry-macos-x86_64-$VERSION](ferry-macos-x86_64-$VERSION)
+        - **macOS Apple Silicon:** [ferry-macos-aarch64-$VERSION](ferry-macos-aarch64-$VERSION)
+        - **Linux x86_64:** [ferry-linux-x86_64-$VERSION](ferry-linux-x86_64-$VERSION)
+
         ## SHA256 Checksums
-        # 添加校验和
-        \`\`\`
-        $(find . -name "*.sha256" -exec cat {} \; || echo "No checksums found")
-        \`\`\`
+        ```
+        $(cat ferry-*.sha256 2>/dev/null || echo "No checksums found")
+        ```
         EOF
 
     - name: Create GitHub Release

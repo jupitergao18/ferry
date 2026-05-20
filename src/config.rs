@@ -10,12 +10,15 @@ const DEFAULT_RETRY_INTERVAL_SECS: u64 = 1;
 const DEFAULT_NODELAY: bool = true;
 const DEFAULT_KEEPALIVE_SECS: u64 = 20;
 const DEFAULT_KEEPALIVE_INTERVAL: u64 = 8;
+const DEFAULT_TIMEOUT: u64 = 10;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Config {
     pub server: Option<ServerConfig>,
     #[serde(default = "default_clients")]
     pub clients: Vec<ClientConfig>,
+    #[serde(default = "default_timeout")]
+    pub timeout: u64,
 }
 
 fn default_clients() -> Vec<ClientConfig> {
@@ -88,6 +91,10 @@ fn default_keepalive_secs() -> u64 {
 
 fn default_keepalive_interval() -> u64 {
     DEFAULT_KEEPALIVE_INTERVAL
+}
+
+fn default_timeout() -> u64 {
+    DEFAULT_TIMEOUT
 }
 
 impl Config {

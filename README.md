@@ -27,6 +27,7 @@ An Intranet Penetration and Service Sharing Tool Similar to frp and rathole
 ### 配置文件 Config file
 ```json
 {
+    "timeout": 10,  // 全局网络超时（秒），默认10，覆盖TCP连接、Noise握手、上游连接
     "server": {
         "bindAddress": "0.0.0.0:17000",  // 服务端监听端口
         "psk": "1234qwer!",  // noise 加密通讯psk

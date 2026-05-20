@@ -100,7 +100,7 @@ impl Instance {
 
         for client_config in self.config.clients.clone() {
             let client_stop_rx = self.stop_tx.subscribe();
-            let mut client = Client::from_config(client_config).await?;
+            let mut client = Client::from_config(client_config, self.config.timeout).await?;
             let task = tokio::spawn(async move { client.run(client_stop_rx).await });
             tasks.push(task);
         }

@@ -1,4 +1,5 @@
 {
+	"timeout" : 10,
 	"server" : {
 		"bind_address" : "0.0.0.0:17000",
 		"psk" : "1234qwerA",

@@ -178,15 +178,25 @@ pub async fn client_handshake(
     nodelay: bool,
     keepalive_secs: u64,
     keepalive_interval: u64,
+    timeout_secs: u64,
 ) -> Result<SecureStream> {
-    let stream = if let Some(proxy) = proxy {
-        proxy_stream(proxy, server_address).await?
-    } else if let Some(s) = server_socket_addr {
-        TcpStream::connect(s).await?
-    } else {
-        TcpStream::connect(server_address).await?
-    };
-    let mut stream = initiator_handshake(stream, psk).await?;
+    let stream = time::timeout(
+        Duration::from_secs(timeout_secs),
+        async {
+            let stream = if let Some(proxy) = proxy {
+                proxy_stream(proxy, server_address).await?
+            } else if let Some(s) = server_socket_addr {
+                TcpStream::connect(s).await?
+            } else {
+                TcpStream::connect(server_address).await?
+            };
+            Ok::<_, anyhow::Error>(stream)
+        }
+    ).await??;
+    let mut stream = time::timeout(
+        Duration::from_secs(timeout_secs),
+        initiator_handshake(stream, psk),
+    ).await??;
     set_tcp_opt(
         stream.get_inner(),
         nodelay,

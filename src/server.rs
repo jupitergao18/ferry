@@ -148,6 +148,15 @@ async fn handle_connection(
                 debug!("Server: request provider instance: {service_name}");
                 if let Err(e) = write_and_flush(provider_stream, consume_service_request).await {
                     warn!("Server: send to provider error: {e:?}");
+                    digest_stream.remove(&service_digest);
+                    if let Some((mut stream, _)) =
+                        server_state.wait_stream.write().await.remove(&nonce)
+                        && let Err(e) =
+                            write_and_flush(&mut stream, ServerResponse::NoProvider).await
+                    {
+                        warn!("Server: response NoProvider to client error: {e:?}");
+                    }
+                    return Ok(());
                 }
                 match read_client_response(provider_stream).await {
                     Ok(provider_response) => {
